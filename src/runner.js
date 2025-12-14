@@ -23,6 +23,12 @@ const openAiChatExecutor = require('./nodeExecutors/openAiChat');
 const agentExecutor = require('./nodeExecutors/agent');
 const googleSheetsExecutor = require('./nodeExecutors/googleSheets');
 const slackExecutor = require('./nodeExecutors/slack');
+const manualTriggerExecutor = require('./nodeExecutors/manualTrigger');
+const scheduleTriggerExecutor = require('./nodeExecutors/scheduleTrigger');
+const limitExecutor = require('./nodeExecutors/limit');
+const waitExecutor = require('./nodeExecutors/wait');
+const emailSendExecutor = require('./nodeExecutors/emailSend');
+const splitInBatchesExecutor = require('./nodeExecutors/splitInBatches');
 const { evaluateExpression } = require('./utils/expressions');
 const TokenInjector = require('./utils/tokenInjector');
 
@@ -62,6 +68,15 @@ class WorkflowRunner {
       'n8n-nodes-base.googleSheets': googleSheetsExecutor,
       // Slack
       'n8n-nodes-base.slack': slackExecutor,
+      // Triggers
+      'n8n-nodes-base.manualTrigger': manualTriggerExecutor,
+      'n8n-nodes-base.scheduleTrigger': scheduleTriggerExecutor,
+      // Flow Control
+      'n8n-nodes-base.limit': limitExecutor,
+      'n8n-nodes-base.wait': waitExecutor,
+      'n8n-nodes-base.splitInBatches': splitInBatchesExecutor,
+      // Email
+      'n8n-nodes-base.emailSend': emailSendExecutor,
     };
     
     this.executionContext = {

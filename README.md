@@ -22,6 +22,12 @@ The Automation Runner:
 - ✅ **AI Node Executor** - LLM/AI API calls (OpenRouter)
 - ✅ **If Node Executor** - Conditional routing
 - ✅ **Merge Node Executor** - Combine data from multiple sources
+- ✅ **Google Sheets Executor** - Read/write to Google Sheets
+- ✅ **Email Send Executor** - Send emails via SMTP
+- ✅ **Split In Batches Executor** - Loop through items in batches
+- ✅ **Wait Executor** - Pause execution for specified duration
+- ✅ **Limit Executor** - Limit number of items processed
+- ✅ **Trigger Executors** - Manual and scheduled workflow triggers
 - ✅ **Expression Evaluator** - Dynamic values like `{{ $json.field }}`
 - ✅ **Queue System** - Async job processing with BullMQ
 - ✅ **Error Handling** - Graceful error handling with continue options
@@ -41,8 +47,20 @@ PORT=3001
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_PASSWORD=
+
+# AI/LLM APIs
 OPENROUTER_API_KEY=your-api-key-here
 OPENROUTER_REFERER=https://your-app.com
+
+# Email (SMTP)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+
+# Google OAuth (for Google Sheets)
+GOOGLE_ACCESS_TOKEN=your-google-access-token
 ```
 
 ## Usage
@@ -158,6 +176,34 @@ A workflow consists of:
 ### Merge (`n8n-nodes-base.merge`)
 - Combine data from multiple inputs
 - Multiple merge modes
+
+### Google Sheets (`n8n-nodes-base.googleSheets`)
+- Read from sheets
+- Append rows to sheets
+- OAuth2 authentication
+
+### Email Send (`n8n-nodes-base.emailSend`)
+- Send emails via SMTP
+- Support for attachments
+- CC, BCC, Reply-To options
+
+### Split In Batches (`n8n-nodes-base.splitInBatches`)
+- Loop through items in batches
+- Configurable batch size
+- Useful for pagination and rate limiting
+
+### Wait (`n8n-nodes-base.wait`)
+- Pause execution
+- Configurable duration (ms, seconds, minutes, hours)
+- Useful for rate limiting API calls
+
+### Limit (`n8n-nodes-base.limit`)
+- Limit number of items processed
+- Useful for testing or quota management
+
+### Triggers
+- **Manual Trigger** (`n8n-nodes-base.manualTrigger`) - Start workflow manually
+- **Schedule Trigger** (`n8n-nodes-base.scheduleTrigger`) - Start workflow on schedule
 
 ## Expression System
 
