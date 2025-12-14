@@ -1,104 +1,94 @@
-const nodemailer = require('nodemailer');
+const { google } = require('googleapis');
 const { evaluateExpression } = require('../utils/expressions');
 
 /**
  * Email Send Node Executor
- * Sends emails via SMTP
+ * Sends emails via Gmail API (OAuth - no password needed!)
  */
 async function execute(node, inputData, executionContext) {
-  const params = node.parameters || {};
-  const operation = params.operation || 'send';
+  // Get Google OAuth token
+  const googleAccessToken = executionContext.tokens?.googleAccessToken ||
+                           executionContext.tokenInjector?.getToken('googleAccessToken') ||
+                           process.env.GOOGLE_ACCESS_TOKEN;
   
-  // Get SMTP credentials from node credentials or environment
-  const credentials = node.credentials?.smtp;
-  const smtpConfig = {
-    host: credentials?.host || process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: credentials?.port || process.env.SMTP_PORT || 587,
-    secure: credentials?.secure || process.env.SMTP_SECURE === 'true' || false,
-    auth: {
-      user: credentials?.user || process.env.SMTP_USER,
-      pass: credentials?.password || process.env.SMTP_PASSWORD
-    }
-  };
-
-  // Validate SMTP credentials
-  if (!smtpConfig.auth.user || !smtpConfig.auth.pass) {
-    throw new Error('SMTP credentials not provided. Set SMTP_USER and SMTP_PASSWORD in environment or node credentials');
+  if (!googleAccessToken) {
+    throw new Error('Google OAuth token not provided. User must connect their Google account to send emails.');
   }
+  
+  console.log('[Email] Using Gmail API with OAuth token');
+  return await executeWithGmailAPI(node, inputData, executionContext, googleAccessToken);
+}
 
-  // Create transporter
-  const transporter = nodemailer.createTransport(smtpConfig);
-
+/**
+ * Send email using Gmail API (OAuth - no password needed!)
+ */
+async function executeWithGmailAPI(node, inputData, executionContext, accessToken) {
+  const params = node.parameters || {};
+  
+  // Initialize Gmail API client
+  const auth = new google.auth.OAuth2();
+  auth.setCredentials({ access_token: accessToken });
+  const gmail = google.gmail({ version: 'v1', auth });
+  
   const results = [];
-
-  // Process each input item (send email for each)
+  
+  // Process each input item
   for (const item of inputData || []) {
     const expressionContext = {
       currentInput: [item],
       executionContext
     };
-
+    
     // Evaluate email parameters
     const fromEmail = evaluateExpression(params.fromEmail || '', expressionContext);
     const toEmail = evaluateExpression(params.toEmail || '', expressionContext);
     const subject = evaluateExpression(params.subject || '', expressionContext);
     const message = evaluateExpression(params.message || params.text || '', expressionContext);
     
-    // Handle email options
-    const options = params.options || {};
-    const ccEmail = options.ccEmail ? evaluateExpression(options.ccEmail, expressionContext) : undefined;
-    const bccEmail = options.bccEmail ? evaluateExpression(options.bccEmail, expressionContext) : undefined;
-    const replyTo = options.replyTo ? evaluateExpression(options.replyTo, expressionContext) : undefined;
-
-    // Build email message
-    const mailOptions = {
-      from: fromEmail,
-      to: toEmail,
-      subject: subject,
-      text: message,
-      html: options.allowHtml ? message : undefined
-    };
-
-    if (ccEmail) mailOptions.cc = ccEmail;
-    if (bccEmail) mailOptions.bcc = bccEmail;
-    if (replyTo) mailOptions.replyTo = replyTo;
-
-    // Handle attachments if present
-    if (options.attachments && item.binary) {
-      mailOptions.attachments = Object.keys(item.binary).map(key => ({
-        filename: key,
-        content: item.binary[key].data
-      }));
-    }
-
+    // Build email in RFC 2822 format
+    const emailLines = [
+      `From: ${fromEmail}`,
+      `To: ${toEmail}`,
+      `Subject: ${subject}`,
+      '',
+      message
+    ];
+    
+    const email = emailLines.join('\r\n');
+    
+    // Encode email in base64url format
+    const encodedEmail = Buffer.from(email)
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    
     try {
-      console.log(`[Email] Sending email to: ${toEmail}`);
+      console.log(`[Email] Sending via Gmail API to: ${toEmail}`);
       
-      // Send email
-      const info = await transporter.sendMail(mailOptions);
+      // Send email via Gmail API
+      const response = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: {
+          raw: encodedEmail
+        }
+      });
       
-      console.log(`[Email] Email sent successfully. Message ID: ${info.messageId}`);
-
+      console.log(`[Email] Email sent successfully via Gmail API. Message ID: ${response.data.id}`);
+      
       results.push({
         json: {
           success: true,
-          messageId: info.messageId,
+          messageId: response.data.id,
           to: toEmail,
           from: fromEmail,
           subject: subject,
-          response: info.response
+          method: 'gmail-api'
         }
       });
-
-      // For sendAndWait operation, wait for a response (webhook-based)
-      // In this implementation, we just return success immediately
-      // Real implementation would need webhook handling
-      if (operation === 'sendAndWait') {
-        console.log(`[Email] sendAndWait operation - webhook handling not implemented, returning success`);
-      }
-
+      
     } catch (error) {
-      console.error(`[Email] Failed to send email:`, error.message);
+      console.error(`[Email] Failed to send via Gmail API:`, error.message);
       
       results.push({
         json: {
@@ -106,12 +96,13 @@ async function execute(node, inputData, executionContext) {
           error: error.message,
           to: toEmail,
           from: fromEmail,
-          subject: subject
+          subject: subject,
+          method: 'gmail-api'
         }
       });
     }
   }
-
+  
   return results;
 }
 

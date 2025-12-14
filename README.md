@@ -259,6 +259,23 @@ this.nodeExecutors = {
 };
 ```
 
+## Scheduling Workflows
+
+Schedule workflows to run automatically at specified intervals:
+
+```bash
+POST http://localhost:3001/schedule
+Content-Type: application/json
+
+{
+  "workflow": {...},
+  "cronExpression": "0 * * * *",  // Every hour
+  "tokens": {...}
+}
+```
+
+See [SCHEDULING_GUIDE.md](./SCHEDULING_GUIDE.md) for complete documentation.
+
 ## Future Enhancements
 
 - [ ] Parallel node execution
@@ -266,7 +283,7 @@ this.nodeExecutors = {
 - [ ] Workflow versioning
 - [ ] Execution logs and monitoring
 - [ ] Webhook support
-- [ ] Scheduled workflows
+- [x] Scheduled workflows ✅
 
 ## License
 

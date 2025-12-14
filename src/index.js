@@ -4,7 +4,13 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const WorkflowRunner = require('./runner');
 const WorkflowService = require('./workflowService');
-const { addWorkflowJob, getJobStatus } = require('./queue');
+const { 
+  addWorkflowJob, 
+  getJobStatus, 
+  scheduleWorkflow, 
+  removeScheduledWorkflow, 
+  listScheduledWorkflows 
+} = require('./queue');
 const { resolveCredentials } = require('./utils/credentialResolver');
 
 const app = express();
@@ -328,18 +334,19 @@ app.get('/status/:jobId', async (req, res) => {
  * 2. Fetch user OAuth tokens using user_id
  * 3. Do placeholder replacement with config
  * 4. Nest config under body for webhook structure
- * 5. Execute workflow
+ * 5. Execute workflow (one-time) OR schedule it (recurring)
  * 6. Return summary (not binary data)
  * 
  * Request body:
  * {
  *   "automation_id": "uuid",
  *   "user_id": "uuid", 
- *   "config": { "key": "value", ... }
+ *   "config": { "key": "value", ... },
+ *   "schedule": true  // Optional: if true, schedules instead of running once
  * }
  */
 app.post('/api/automations/run', async (req, res) => {
-  const { automation_id, user_id, config = {} } = req.body;
+  const { automation_id, user_id, config = {}, schedule = false } = req.body;
 
   // Validate required parameters
   if (!automation_id) {
@@ -369,7 +376,7 @@ app.post('/api/automations/run', async (req, res) => {
 
     const { data: automationData, error: automationError } = await supabase
       .from('automations')
-      .select('workflow, developer_keys')
+      .select('workflow, developer_keys, default_schedule')
       .eq('id', automation_id)
       .single();
 
@@ -426,6 +433,12 @@ app.post('/api/automations/run', async (req, res) => {
     if (developerKeys.HUGGINGFACE_API_KEY && !tokens.huggingFaceApiKey) {
       tokens.huggingFaceApiKey = developerKeys.HUGGINGFACE_API_KEY;
     }
+    
+    // Add SMTP credentials from developer keys (if provided)
+    if (developerKeys.SMTP_HOST) tokens.smtpHost = developerKeys.SMTP_HOST;
+    if (developerKeys.SMTP_PORT) tokens.smtpPort = developerKeys.SMTP_PORT;
+    if (developerKeys.SMTP_USER) tokens.smtpUser = developerKeys.SMTP_USER;
+    if (developerKeys.SMTP_PASSWORD) tokens.smtpPassword = developerKeys.SMTP_PASSWORD;
 
     // Step 4: Fetch user OAuth tokens from user_integrations
     const { data: integrations, error: integrationsError } = await supabase
@@ -485,25 +498,60 @@ app.post('/api/automations/run', async (req, res) => {
     console.log(`[Orchestration] Executing workflow with config keys: ${Object.keys(config).join(', ')}`);
     console.log(`[Orchestration] Added ${Object.keys(tokens).length} tokens to webhook body`);
 
-    // Step 7: Execute workflow
-    const runner = new WorkflowRunner();
-    const result = await runner.execute(
-      workflow,
-      initialData,
-      tokens,
-      {} // No custom token mapping needed
-    );
+    // Step 7: Execute or Schedule workflow
+    if (schedule) {
+      // User wants to schedule it - check if automation supports scheduling
+      const cronExpression = automationData.default_schedule;
+      
+      if (!cronExpression) {
+        return res.status(400).json({
+          success: false,
+          error: 'This automation does not support scheduling. It can only be run once.'
+        });
+      }
+      
+      console.log(`[Orchestration] Scheduling workflow with expression: ${cronExpression}`);
+      
+      const scheduleResult = await scheduleWorkflow(
+        workflow,
+        initialData,
+        tokens,
+        {},
+        cronExpression
+      );
+      
+      console.log(`[Orchestration] Workflow scheduled. Next run: ${scheduleResult.nextRun}`);
+      
+      res.json({
+        success: true,
+        scheduled: true,
+        automation_id,
+        user_id,
+        schedule: scheduleResult,
+        message: `Automation scheduled to run ${cronExpression}`
+      });
+    } else {
+      // Execute workflow once
+      const runner = new WorkflowRunner();
+      const result = await runner.execute(
+        workflow,
+        initialData,
+        tokens,
+        {} // No custom token mapping needed
+      );
 
-    // Step 8: Return lightweight summary (no outputs, no binary data)
-    console.log(`[Orchestration] Execution complete. Success: ${result.success}`);
+      // Step 8: Return lightweight summary (no outputs, no binary data)
+      console.log(`[Orchestration] Execution complete. Success: ${result.success}`);
 
-    res.json({
-      success: result.success,
-      automation_id,
-      user_id,
-      errors: result.errors || [],
-      executed_at: new Date().toISOString()
-    });
+      res.json({
+        success: result.success,
+        scheduled: false,
+        automation_id,
+        user_id,
+        errors: result.errors || [],
+        executed_at: new Date().toISOString()
+      });
+    }
 
   } catch (error) {
     console.error('[Orchestration] Execution error:', error);
@@ -512,6 +560,115 @@ app.post('/api/automations/run', async (req, res) => {
       error: error.message,
       automation_id,
       user_id
+    });
+  }
+});
+
+/**
+ * POST /schedule
+ * Schedule a workflow to run repeatedly
+ * 
+ * Request body:
+ * {
+ *   workflow: {...},
+ *   initialData: {...},
+ *   tokens: {...},
+ *   tokenMapping: {...},
+ *   cronExpression: "0 * * * *"  // Every hour
+ * }
+ */
+app.post('/schedule', async (req, res) => {
+  try {
+    const { workflow, initialData, tokens, tokenMapping, cronExpression } = req.body;
+
+    if (!workflow) {
+      return res.status(400).json({ error: 'Workflow is required' });
+    }
+
+    if (!cronExpression) {
+      return res.status(400).json({ 
+        error: 'cronExpression is required',
+        examples: {
+          'every_hour': '0 * * * *',
+          'every_day_9am': '0 9 * * *',
+          'every_30_minutes': '*/30 * * * *',
+          'every_monday_9am': '0 9 * * 1'
+        }
+      });
+    }
+
+    console.log(`[API] Scheduling workflow: ${workflow.name || 'unnamed'}`);
+    console.log(`[API] Schedule: ${cronExpression}`);
+    if (tokens) {
+      const tokenKeys = Object.keys(tokens).filter(key => tokens[key] !== null);
+      console.log(`[API] Injecting tokens: ${tokenKeys.join(', ')}`);
+    }
+
+    const scheduleInfo = await scheduleWorkflow(
+      workflow,
+      initialData || {},
+      tokens || {},
+      tokenMapping || {},
+      cronExpression
+    );
+
+    res.json({
+      success: true,
+      message: 'Workflow scheduled successfully',
+      schedule: scheduleInfo
+    });
+  } catch (error) {
+    console.error('[API] Schedule error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * DELETE /schedule/:jobKey
+ * Remove a scheduled workflow
+ */
+app.delete('/schedule/:jobKey', async (req, res) => {
+  try {
+    const { jobKey } = req.params;
+
+    console.log(`[API] Removing scheduled workflow: ${jobKey}`);
+
+    await removeScheduledWorkflow(jobKey);
+
+    res.json({
+      success: true,
+      message: 'Scheduled workflow removed successfully'
+    });
+  } catch (error) {
+    console.error('[API] Remove schedule error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /schedules
+ * List all scheduled workflows
+ */
+app.get('/schedules', async (req, res) => {
+  try {
+    const schedules = await listScheduledWorkflows();
+
+    res.json({
+      success: true,
+      count: schedules.length,
+      schedules
+    });
+  } catch (error) {
+    console.error('[API] List schedules error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 });
@@ -531,6 +688,9 @@ app.listen(PORT, () => {
   console.log(`   POST /execute - Execute workflow immediately`);
   console.log(`   POST /queue - Queue workflow for async execution`);
   console.log(`   GET /status/:jobId - Get job status`);
+  console.log(`   POST /schedule - Schedule workflow to run repeatedly`);
+  console.log(`   GET /schedules - List all scheduled workflows`);
+  console.log(`   DELETE /schedule/:jobKey - Remove scheduled workflow`);
   console.log(`   GET /health - Health check`);
 });
 
