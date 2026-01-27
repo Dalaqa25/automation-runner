@@ -4,14 +4,15 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 const WorkflowRunner = require('./runner');
 const WorkflowService = require('./workflowService');
-const { 
-  addWorkflowJob, 
-  getJobStatus, 
-  scheduleWorkflow, 
-  removeScheduledWorkflow, 
-  listScheduledWorkflows 
+const {
+  addWorkflowJob,
+  getJobStatus,
+  scheduleWorkflow,
+  removeScheduledWorkflow,
+  listScheduledWorkflows
 } = require('./queue');
 const { resolveCredentials } = require('./utils/credentialResolver');
+const { getBackgroundService } = require('./backgroundService');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -47,7 +48,7 @@ const workflowService = new WorkflowService({
         console.error('[Supabase] Error loading workflow template:', error);
       } else if (data) {
         let template = data.workflow;
-        
+
         // Handle case where workflow might be stored as JSON string
         if (typeof template === 'string') {
           try {
@@ -57,16 +58,16 @@ const workflowService = new WorkflowService({
             throw new Error('Invalid workflow JSON format in database');
           }
         }
-        
+
         // Validate structure
         if (!template || typeof template !== 'object') {
           throw new Error('Workflow template must be a valid JSON object');
         }
-        
+
         if (!Array.isArray(template.nodes)) {
           throw new Error('Workflow template must have a nodes array');
         }
-        
+
         // Debug: log the structure to help diagnose issues
         console.log('[Supabase] Loaded workflow template:', {
           hasNodes: !!template.nodes,
@@ -75,7 +76,7 @@ const workflowService = new WorkflowService({
           nodeTypes: template.nodes.map(n => n.type),
           nodeNames: template.nodes.map(n => n.name),
         });
-        
+
         return {
           template,
           requiredParameters: undefined, // Will be computed from template if needed
@@ -242,9 +243,9 @@ app.post('/execute', async (req, res) => {
 
     const runner = new WorkflowRunner();
     const result = await runner.execute(
-      workflow, 
-      initialData || {}, 
-      tokens || {}, 
+      workflow,
+      initialData || {},
+      tokens || {},
       tokenMapping || {}
     );
 
@@ -288,8 +289,8 @@ app.post('/queue', async (req, res) => {
     }
 
     const jobId = await addWorkflowJob(
-      workflow, 
-      initialData || {}, 
+      workflow,
+      initialData || {},
       tokens || {},
       tokenMapping || {}
     );
@@ -350,23 +351,23 @@ app.post('/api/automations/run', async (req, res) => {
 
   // Validate required parameters
   if (!automation_id) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'automation_id is required' 
+    return res.status(400).json({
+      success: false,
+      error: 'automation_id is required'
     });
   }
 
   if (!user_id) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'user_id is required' 
+    return res.status(400).json({
+      success: false,
+      error: 'user_id is required'
     });
   }
 
   try {
     console.log(`[Orchestration] Starting automation: ${automation_id} for user: ${user_id}`);
 
-    // Step 1: Fetch workflow from database
+    // Step 1: Check database connection
     if (!supabase) {
       return res.status(500).json({
         success: false,
@@ -374,9 +375,30 @@ app.post('/api/automations/run', async (req, res) => {
       });
     }
 
+    // Step 2: Fetch user_automation for this specific user (includes OAuth tokens and automation_data)
+    console.log(`[Orchestration] Fetching user_automation for user_id=${user_id}, automation_id=${automation_id}`);
+
+    const { data: instanceData, error: instanceError } = await supabase
+      .from('user_automations')
+      .select('id, automation_id, user_id, parameters, is_active, access_token, refresh_token, token_expiry, automation_data, run_count')
+      .eq('user_id', user_id)
+      .eq('automation_id', automation_id)
+      .single();
+
+    if (instanceError || !instanceData) {
+      console.error('[Orchestration] Failed to fetch user_automation:', instanceError);
+      return res.status(404).json({
+        success: false,
+        error: `No user automation found for user ${user_id} and automation ${automation_id}. User needs to set up this automation first.`
+      });
+    }
+
+    console.log(`[Orchestration] Found user_automation: ${instanceData.id}`);
+
+    // Step 3: Fetch the workflow template from automations table
     const { data: automationData, error: automationError } = await supabase
       .from('automations')
-      .select('workflow, developer_keys, default_schedule')
+      .select('workflow, developer_keys')
       .eq('id', automation_id)
       .single();
 
@@ -384,12 +406,12 @@ app.post('/api/automations/run', async (req, res) => {
       console.error('[Orchestration] Failed to fetch automation:', automationError);
       return res.status(404).json({
         success: false,
-        error: `Automation not found: ${automation_id}`
+        error: `Automation template not found: ${automation_id}`
       });
     }
 
     let workflow = automationData.workflow;
-    
+
     // Parse if stored as string
     if (typeof workflow === 'string') {
       try {
@@ -405,13 +427,17 @@ app.post('/api/automations/run', async (req, res) => {
 
     console.log(`[Orchestration] Workflow loaded: ${workflow.name || 'unnamed'}`);
 
-    // Step 2: Fetch developer keys from automation
+    // Step 4: Use config from request OR from stored user_automation parameters
+    const userConfig = config && Object.keys(config).length > 0 ? config : instanceData.parameters;
+    console.log(`[Orchestration] Using config with keys: ${Object.keys(userConfig).join(', ')}`);
+
+    // Step 5: Fetch developer keys from automation
     const developerKeys = automationData.developer_keys || {};
-    
-    // Step 2.5: Resolve credential placeholders in workflow
+
+    // Step 6: Resolve credential placeholders in workflow
     const { workflow: resolvedWorkflow, resolvedCredentials } = resolveCredentials(workflow, developerKeys);
     workflow = resolvedWorkflow; // Use resolved workflow
-    
+
     console.log(`[Orchestration] Loaded ${Object.keys(developerKeys).length} developer keys`);
     if (Object.keys(resolvedCredentials).length > 0) {
       console.log(`[Orchestration] Resolved ${Object.keys(resolvedCredentials).length} credential placeholders`);
@@ -419,7 +445,7 @@ app.post('/api/automations/run', async (req, res) => {
 
     // Step 3: Build tokens object from developer keys
     const tokens = { ...resolvedCredentials }; // Start with resolved credentials
-    
+
     // Add any remaining developer keys that weren't resolved
     if (developerKeys.OPEN_ROUTER_API_KEY && !tokens.openRouterApiKey) {
       tokens.openRouterApiKey = developerKeys.OPEN_ROUTER_API_KEY;
@@ -433,53 +459,92 @@ app.post('/api/automations/run', async (req, res) => {
     if (developerKeys.HUGGINGFACE_API_KEY && !tokens.huggingFaceApiKey) {
       tokens.huggingFaceApiKey = developerKeys.HUGGINGFACE_API_KEY;
     }
-    
+    if (developerKeys.GROQ_API_KEY && !tokens.groqApiKey) {
+      tokens.groqApiKey = developerKeys.GROQ_API_KEY;
+    }
+
     // Add SMTP credentials from developer keys (if provided)
     if (developerKeys.SMTP_HOST) tokens.smtpHost = developerKeys.SMTP_HOST;
     if (developerKeys.SMTP_PORT) tokens.smtpPort = developerKeys.SMTP_PORT;
     if (developerKeys.SMTP_USER) tokens.smtpUser = developerKeys.SMTP_USER;
     if (developerKeys.SMTP_PASSWORD) tokens.smtpPassword = developerKeys.SMTP_PASSWORD;
 
-    // Step 4: Fetch user OAuth tokens from user_integrations
-    const { data: integrations, error: integrationsError } = await supabase
-      .from('user_integrations')
-      .select('*')
-      .eq('user_id', user_id);
-
-    if (integrationsError) {
-      console.warn('[Orchestration] Failed to fetch user integrations:', integrationsError);
-    } else if (integrations && integrations.length > 0) {
-      // Process each integration (Google, Slack, etc.)
-      integrations.forEach(integration => {
-        const provider = integration.provider?.toLowerCase();
-        
-        if (provider === 'google') {
-          if (integration.access_token) tokens.googleAccessToken = integration.access_token;
-          if (integration.refresh_token) tokens.googleRefreshToken = integration.refresh_token;
-        } else if (provider === 'slack') {
-          if (integration.access_token) tokens.slackToken = integration.access_token;
-        }
-        // Add more providers as needed
-      });
-      
-      console.log(`[Orchestration] Loaded ${integrations.length} user integrations: ${integrations.map(i => i.provider).join(', ')}`);
-    } else {
-      console.warn('[Orchestration] No user integrations found for user:', user_id);
+    // Step 4: Add user OAuth tokens from user_automations (stored directly in the record)
+    if (instanceData.access_token) {
+      tokens.googleAccessToken = instanceData.access_token;
+      console.log(`[Orchestration] Loaded Google access token from user_automations`);
     }
-    
+    if (instanceData.refresh_token) {
+      tokens.googleRefreshToken = instanceData.refresh_token;
+      console.log(`[Orchestration] Loaded Google refresh token from user_automations`);
+    }
+
+    // Check if token is expired and needs refresh
+    if (instanceData.token_expiry) {
+      const tokenExpiry = new Date(instanceData.token_expiry);
+      const isExpired = tokenExpiry < new Date();
+
+      if (isExpired && instanceData.refresh_token) {
+        console.log(`[Orchestration] Access token expired, refreshing...`);
+
+        try {
+          // Refresh the token using Google OAuth2
+          const refreshResponse = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              client_id: process.env.GOOGLE_CLIENT_ID,
+              client_secret: process.env.GOOGLE_CLIENT_SECRET,
+              refresh_token: instanceData.refresh_token,
+              grant_type: 'refresh_token'
+            })
+          });
+
+          const refreshData = await refreshResponse.json();
+
+          if (!refreshResponse.ok) {
+            throw new Error(`Token refresh failed: ${refreshData.error_description || refreshData.error}`);
+          }
+
+          // Update tokens in memory for this execution
+          tokens.googleAccessToken = refreshData.access_token;
+
+          // Update database with new token
+          const newExpiry = new Date(Date.now() + (refreshData.expires_in * 1000));
+          await supabase
+            .from('user_automations')
+            .update({
+              access_token: refreshData.access_token,
+              token_expiry: newExpiry.toISOString()
+            })
+            .eq('id', instanceData.id);
+
+          console.log(`[Orchestration] Token refreshed successfully, expires at ${newExpiry.toISOString()}`);
+        } catch (refreshError) {
+          console.error(`[Orchestration] Token refresh failed:`, refreshError.message);
+          return res.status(401).json({
+            success: false,
+            error: `Google authentication expired and refresh failed: ${refreshError.message}. User needs to re-authenticate.`
+          });
+        }
+      }
+    }
+
     const tokenKeys = Object.keys(tokens);
     console.log(`[Orchestration] Total tokens available: ${tokenKeys.length} (${tokenKeys.join(', ')})`)
 
-    // Step 5: Do placeholder replacement with config
-    // The TokenInjector in WorkflowRunner will handle {{PARAM_NAME}} replacements
-    // We'll pass config as parameters for placeholder replacement
-    
-    // Step 6: Nest config under body for webhook structure
+    // Step 5: Load automation_data (contains lastPollTime, processedFiles, etc.)
+    const automationState = instanceData.automation_data || {};
+    const lastPollTime = automationState.lastPollTime || new Date(Date.now() - 86400000).toISOString(); // Default: 24 hours ago
+    const processedFiles = new Set(automationState.processedFiles || []);
+
+    console.log(`[Orchestration] Loaded automation_data: lastPollTime=${lastPollTime}, processedFiles=${processedFiles.size} files`);
+
+    // Step 6: Nest userConfig under body for webhook structure
     // This creates the initial data that webhook nodes expect
-    // Also add tokens to body so workflow can access them (e.g., access_token)
     const initialData = {
       body: {
-        ...config,
+        ...userConfig,
         // Add tokens to body for workflows that expect them
         access_token: tokens.googleAccessToken || null,
         refresh_token: tokens.googleRefreshToken || null,
@@ -495,63 +560,77 @@ app.post('/api/automations/run', async (req, res) => {
       query: {}
     };
 
-    console.log(`[Orchestration] Executing workflow with config keys: ${Object.keys(config).join(', ')}`);
-    console.log(`[Orchestration] Added ${Object.keys(tokens).length} tokens to webhook body`);
+    console.log(`[Orchestration] Executing workflow with config keys: ${Object.keys(userConfig).join(', ')}`);
+    console.log(`[Orchestration] Added ${Object.keys(tokens).length} tokens to execution context`);
 
-    // Step 7: Execute or Schedule workflow
-    if (schedule) {
-      // User wants to schedule it - check if automation supports scheduling
-      const cronExpression = automationData.default_schedule;
-      
-      if (!cronExpression) {
-        return res.status(400).json({
-          success: false,
-          error: 'This automation does not support scheduling. It can only be run once.'
-        });
-      }
-      
-      console.log(`[Orchestration] Scheduling workflow with expression: ${cronExpression}`);
-      
-      const scheduleResult = await scheduleWorkflow(
-        workflow,
-        initialData,
-        tokens,
-        {},
-        cronExpression
-      );
-      
-      console.log(`[Orchestration] Workflow scheduled. Next run: ${scheduleResult.nextRun}`);
-      
-      res.json({
-        success: true,
-        scheduled: true,
-        automation_id,
-        user_id,
-        schedule: scheduleResult,
-        message: `Automation scheduled to run ${cronExpression}`
-      });
+    // Step 7: Execute workflow once (no scheduling for now)
+    const runner = new WorkflowRunner();
+
+    // Pre-set execution context data that needs to persist
+    // (will be merged into the context created by execute())
+    runner.lastPollTime = lastPollTime;
+    runner.processedFiles = processedFiles;
+    runner.initialData = initialData;
+
+    const result = await runner.execute(
+      workflow,
+      initialData,
+      tokens,
+      {} // No custom token mapping needed
+    );
+
+    // Step 8: Update automation_data with new processed files
+    const newPollTime = new Date().toISOString();
+    const updatedAutomationData = {
+      lastPollTime: newPollTime,
+      processedFiles: Array.from(processedFiles),
+      lastRun: newPollTime,
+      totalProcessed: processedFiles.size
+    };
+
+    // Get current run_count to increment it
+    const currentRunCount = instanceData.run_count || 0;
+
+    // Save updated automation_data back to database
+    const { error: updateError } = await supabase
+      .from('user_automations')
+      .update({
+        automation_data: updatedAutomationData,
+        last_run_at: newPollTime,
+        run_count: currentRunCount + 1
+      })
+      .eq('id', instanceData.id);
+
+    if (updateError) {
+      console.error('[Orchestration] Failed to update automation_data:', updateError);
     } else {
-      // Execute workflow once
-      const runner = new WorkflowRunner();
-      const result = await runner.execute(
-        workflow,
-        initialData,
-        tokens,
-        {} // No custom token mapping needed
-      );
-
-      // Step 8: Return lightweight summary (no outputs, no binary data)
-      console.log(`[Orchestration] Execution complete. Success: ${result.success}`);
-
-      res.json({
-        success: result.success,
-        scheduled: false,
-        automation_id,
-        user_id,
-        errors: result.errors || [],
-        executed_at: new Date().toISOString()
-      });
+      console.log(`[Orchestration] Updated automation_data: ${processedFiles.size} files tracked`);
     }
+
+    // Step 9: Return lightweight summary
+    console.log(`[Orchestration] Execution complete. Success: ${result.success}`);
+
+    if (!result.success && result.errors && result.errors.length > 0) {
+      console.error(`[Orchestration] Execution errors:`, result.errors);
+    }
+
+    // Check if this was a "no new files" scenario (not an actual error)
+    const triggerOutput = result.outputs?.['When Invoices Are Uploaded'] || [];
+    const noNewFiles = triggerOutput.length === 0;
+
+    // If trigger found no files and there are no other errors, consider it success
+    const actualSuccess = noNewFiles ? true : result.success;
+
+    res.json({
+      success: actualSuccess,
+      automation_id,
+      user_id,
+      errors: actualSuccess ? [] : (result.errors || []),
+      message: noNewFiles ? 'No new files to process' : undefined,
+      filesProcessed: triggerOutput.length,
+      outputs: result.success ? result.outputs : undefined, // Include outputs on success for debugging
+      executed_at: new Date().toISOString()
+    });
 
   } catch (error) {
     console.error('[Orchestration] Execution error:', error);
@@ -586,7 +665,7 @@ app.post('/schedule', async (req, res) => {
     }
 
     if (!cronExpression) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'cronExpression is required',
         examples: {
           'every_hour': '0 * * * *',
@@ -674,6 +753,342 @@ app.get('/schedules', async (req, res) => {
 });
 
 /**
+ * POST /api/user-automations/setup
+ * Setup a user automation with their specific parameters and OAuth tokens
+ * This is called from the frontend when user configures an automation
+ * 
+ * Request body:
+ * {
+ *   "user_id": "uuid",
+ *   "automation_id": "uuid",
+ *   "provider": "google",
+ *   "parameters": {
+ *     "folder_id": "...",
+ *     "spreadsheet_id": "...",
+ *     "billing_email": "..."
+ *   },
+ *   "access_token": "ya29...",      // Google OAuth access token
+ *   "refresh_token": "1//0g...",    // Google OAuth refresh token
+ *   "token_expiry": "2025-01-26T11:30:00Z"  // Optional, will calculate if not provided
+ * }
+ */
+app.post('/api/user-automations/setup', async (req, res) => {
+  const { user_id, automation_id, provider, parameters, access_token, refresh_token, token_expiry } = req.body;
+
+  if (!user_id || !automation_id || !parameters) {
+    return res.status(400).json({
+      success: false,
+      error: 'user_id, automation_id, and parameters are required'
+    });
+  }
+
+  if (!access_token || !refresh_token) {
+    return res.status(400).json({
+      success: false,
+      error: 'access_token and refresh_token are required. User must connect their Google account first.'
+    });
+  }
+
+  try {
+    if (!supabase) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database not configured'
+      });
+    }
+
+    // Calculate token expiry if not provided (default: 1 hour from now)
+    const expiryTime = token_expiry || new Date(Date.now() + 3600000).toISOString();
+
+    // Check if user automation already exists
+    const { data: existing, error: checkError } = await supabase
+      .from('user_automations')
+      .select('id, parameters')
+      .eq('user_id', user_id)
+      .eq('automation_id', automation_id)
+      .single();
+
+    let result;
+
+    if (existing) {
+      // Update existing user automation
+      const { data, error } = await supabase
+        .from('user_automations')
+        .update({
+          parameters: parameters,
+          provider: provider || 'google',
+          access_token: access_token,
+          refresh_token: refresh_token,
+          token_expiry: expiryTime,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', existing.id)
+        .select()
+        .single();
+
+      if (error) throw error;
+      result = data;
+
+      console.log(`[API] Updated user automation ${existing.id} for user ${user_id}`);
+    } else {
+      // Create new user automation
+      const { data, error } = await supabase
+        .from('user_automations')
+        .insert({
+          user_id: user_id,
+          automation_id: automation_id,
+          provider: provider || 'google',
+          parameters: parameters,
+          access_token: access_token,
+          refresh_token: refresh_token,
+          token_expiry: expiryTime,
+          is_active: false,
+          automation_data: {}
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      result = data;
+
+      console.log(`[API] Created user automation ${result.id} for user ${user_id}`);
+    }
+
+    res.json({
+      success: true,
+      message: 'User automation configured successfully',
+      user_automation: {
+        ...result,
+        access_token: '***', // Don't send full token back
+        refresh_token: '***'
+      }
+    });
+
+  } catch (error) {
+    console.error('[API] Setup user automation error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/user-automations/:userId
+ * Get all automations for a user
+ */
+app.get('/api/user-automations/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    if (!supabase) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database not configured'
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('user_automations')
+      .select(`
+        id,
+        automation_id,
+        provider,
+        is_active,
+        parameters,
+        automation_data,
+        last_run_at,
+        run_count,
+        created_at,
+        automations (
+          id,
+          name,
+          description
+        )
+      `)
+      .eq('user_id', userId);
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      count: data.length,
+      user_automations: data
+    });
+
+  } catch (error) {
+    console.error('[API] Get user automations error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * POST /api/automations/start-polling
+ * Start background polling for a workflow with trigger
+ * 
+ * Flow:
+ * 1. Receive config from frontend
+ * 2. Test run the automation
+ * 3. If successful → Save config to database + start polling
+ * 4. If failed → Return error (don't save, don't start)
+ * 
+ * Request body:
+ * {
+ *   "automation_id": "uuid",
+ *   "user_id": "uuid",
+ *   "config": { 
+ *     "folder_id": "...", 
+ *     "spreadsheet_id": "...", 
+ *     "billing_email": "..." 
+ *   }
+ * }
+ */
+app.post('/api/automations/start-polling', async (req, res) => {
+  const { automation_id, user_id, config } = req.body;
+
+  if (!automation_id || !user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'automation_id and user_id are required'
+    });
+  }
+
+  if (!config) {
+    return res.status(400).json({
+      success: false,
+      error: 'config is required for first-time setup'
+    });
+  }
+
+  try {
+    const backgroundService = getBackgroundService();
+
+    // Try to start polling (this will do a test run first)
+    console.log(`[API] Received request:`, {
+      automation_id,
+      user_id,
+      has_config: !!config,
+      config_keys: config ? Object.keys(config) : []
+    });
+    console.log(`[API] Testing automation with provided config...`);
+
+    await backgroundService.startPolling(automation_id, user_id, config);
+
+    // If we get here, it worked! Save config to database
+    console.log(`[API] Test successful! Saving config to database...`);
+
+    if (supabase) {
+      const { error: updateError } = await supabase
+        .from('user_automations')
+        .update({
+          parameters: config,
+          updated_at: new Date().toISOString()
+        })
+        .eq('user_id', user_id)
+        .eq('automation_id', automation_id);
+
+      if (updateError) {
+        console.error('[API] Warning: Failed to save config to database:', updateError);
+        // Don't fail the request, polling is already started
+      } else {
+        console.log(`[API] Config saved to database successfully`);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Automation started successfully! Config saved. Polling every minute.`,
+      automation_id,
+      user_id,
+      config_saved: true
+    });
+
+  } catch (error) {
+    console.error('[API] Start polling error:', error);
+
+    // Test failed - don't save config, don't start polling
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'FUCK YOU!!! Fix your config and try again! 🖕',
+      details: {
+        automation_id,
+        user_id,
+        config_provided: !!config,
+        error_type: error.message.includes('OAuth') ? 'missing_tokens' :
+          error.message.includes('not found') ? 'invalid_ids' :
+            'configuration_error'
+      }
+    });
+  }
+});
+
+/**
+ * POST /api/automations/stop-polling
+ * Stop background polling for a workflow
+ * 
+ * Request body:
+ * {
+ *   "automation_id": "uuid",
+ *   "user_id": "uuid"
+ * }
+ */
+app.post('/api/automations/stop-polling', async (req, res) => {
+  const { automation_id, user_id } = req.body;
+
+  if (!automation_id || !user_id) {
+    return res.status(400).json({
+      success: false,
+      error: 'automation_id and user_id are required'
+    });
+  }
+
+  try {
+    const backgroundService = getBackgroundService();
+    await backgroundService.stopPolling(automation_id, user_id);
+
+    res.json({
+      success: true,
+      message: `Stopped polling for automation ${automation_id} for user ${user_id}`,
+      automation_id,
+      user_id
+    });
+  } catch (error) {
+    console.error('[API] Stop polling error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * GET /api/automations/active-polls
+ * Get list of workflows currently being polled
+ */
+app.get('/api/automations/active-polls', (req, res) => {
+  try {
+    const backgroundService = getBackgroundService();
+    const activePolls = backgroundService.getActivePolls();
+
+    res.json({
+      success: true,
+      count: activePolls.length,
+      workflows: activePolls
+    });
+  } catch (error) {
+    console.error('[API] Active polls error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
  * GET /health
  * Health check endpoint
  */
@@ -684,6 +1099,11 @@ app.get('/health', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Automation Runner listening on port ${PORT}`);
   console.log(`📡 Endpoints:`);
+  console.log(`   POST /api/user-automations/setup - Setup user automation with parameters`);
+  console.log(`   GET /api/user-automations/:userId - Get all automations for a user`);
+  console.log(`   POST /api/automations/start-polling - Start background polling for triggers`);
+  console.log(`   POST /api/automations/stop-polling - Stop background polling`);
+  console.log(`   GET /api/automations/active-polls - List active polling workflows`);
   console.log(`   POST /api/automations/run - Full orchestration (automation_id, user_id, config)`);
   console.log(`   POST /execute - Execute workflow immediately`);
   console.log(`   POST /queue - Queue workflow for async execution`);
@@ -692,5 +1112,20 @@ app.listen(PORT, () => {
   console.log(`   GET /schedules - List all scheduled workflows`);
   console.log(`   DELETE /schedule/:jobKey - Remove scheduled workflow`);
   console.log(`   GET /health - Health check`);
+});
+
+// Cleanup on shutdown
+process.on('SIGTERM', () => {
+  console.log('[Server] SIGTERM received, stopping all polling...');
+  const backgroundService = getBackgroundService();
+  backgroundService.stopAll();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('[Server] SIGINT received, stopping all polling...');
+  const backgroundService = getBackgroundService();
+  backgroundService.stopAll();
+  process.exit(0);
 });
 

@@ -119,6 +119,25 @@ function evaluateExpressionValue(expression, context) {
     return context.currentInput || [];
   }
 
+  // Simple placeholder without $ prefix - look in body first, then currentInput
+  // This handles {{billing_email}}, {{folder_id}}, etc.
+  if (!expr.startsWith('$')) {
+    // Try to find in body (from webhook/trigger initial data)
+    const bodyData = context.executionContext?.initialData?.body || 
+                     context.currentInput?.[0]?.json?.body;
+    if (bodyData && expr in bodyData) {
+      return bodyData[expr];
+    }
+    
+    // Try to find in current input json
+    const inputItem = context.currentInput && context.currentInput.length > 0 
+      ? context.currentInput[0] 
+      : null;
+    if (inputItem?.json && expr in inputItem.json) {
+      return inputItem.json[expr];
+    }
+  }
+
   // Fallback: try to evaluate as $json
   if (expr.startsWith('$')) {
     return getJsonValue(expr, context.currentInput);

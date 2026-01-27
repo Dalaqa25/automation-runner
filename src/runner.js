@@ -29,8 +29,12 @@ const limitExecutor = require('./nodeExecutors/limit');
 const waitExecutor = require('./nodeExecutors/wait');
 const emailSendExecutor = require('./nodeExecutors/emailSend');
 const splitInBatchesExecutor = require('./nodeExecutors/splitInBatches');
+const groqChatExecutor = require('./nodeExecutors/groqChat');
 const { evaluateExpression } = require('./utils/expressions');
 const TokenInjector = require('./utils/tokenInjector');
+
+// Invoice System Manager modules
+const invoiceSystemManager = require('./invoice-system-manager');
 
 class WorkflowRunner {
   constructor() {
@@ -59,13 +63,20 @@ class WorkflowRunner {
       '@n8n/n8n-nodes-langchain.lmChatOpenAi': openAiChatExecutor,
       '@n8n/n8n-nodes-langchain.lmChatAnthropic': anthropicChatExecutor,
       '@n8n/n8n-nodes-langchain.lmChatHf': huggingFaceChatExecutor,
+      '@n8n/n8n-nodes-langchain.lmChatGroq': groqChatExecutor,
       '@n8n/n8n-nodes-langchain.agent': agentExecutor,
       '@n8n/n8n-nodes-langchain.outputParserStructured': outputParserStructuredExecutor,
+      '@n8n/n8n-nodes-langchain.informationExtractor': invoiceSystemManager.informationExtractor,
       // Data manipulation
       'n8n-nodes-base.set': setExecutor,
       'n8n-nodes-base.extractFromFile': extractFromFileExecutor,
       // Google Sheets
       'n8n-nodes-base.googleSheets': googleSheetsExecutor,
+      // Google Drive
+      'n8n-nodes-base.googleDrive': invoiceSystemManager.googleDrive,
+      'n8n-nodes-base.googleDriveTrigger': invoiceSystemManager.googleDriveTrigger,
+      // Gmail
+      'n8n-nodes-base.gmailTool': invoiceSystemManager.gmailTool,
       // Slack
       'n8n-nodes-base.slack': slackExecutor,
       // Triggers
@@ -78,7 +89,7 @@ class WorkflowRunner {
       // Email
       'n8n-nodes-base.emailSend': emailSendExecutor,
     };
-    
+
     this.executionContext = {
       nodes: {}, // Store outputs from all executed nodes
       currentNode: null,
@@ -97,38 +108,42 @@ class WorkflowRunner {
   async execute(workflow, initialData = {}, tokens = {}, tokenMapping = {}) {
     // Initialize token injector with optional custom mapping
     const tokenInjector = new TokenInjector(tokens, tokenMapping);
-    
+
     // Pre-process workflow to inject tokens into node parameters
     const processedWorkflow = tokenInjector.injectIntoWorkflow(workflow);
-    
+
     this.executionContext = {
       nodes: {},
       currentNode: null,
       errors: [],
       workflow: processedWorkflow,
-      tokens: {}
+      tokens: {},
+      // Preserve pre-set values from orchestration (for polling triggers)
+      lastPollTime: this.lastPollTime || null,
+      processedFiles: this.processedFiles || new Set(),
+      initialData: this.initialData || initialData
     };
-    
+
     // Inject tokens into execution context
     tokenInjector.injectIntoContext(this.executionContext);
-    
+
     // Store token injector for node executors to access
     this.executionContext.tokenInjector = tokenInjector;
 
     try {
       // Find entry nodes (nodes with no incoming connections)
       const entryNodes = this.findEntryNodes(processedWorkflow);
-      
+
       if (entryNodes.length === 0) {
         throw new Error('No entry nodes found in workflow');
       }
 
       // Execute entry nodes with initial data
       // Format initialData as array of items (like node outputs)
-      const formattedInitialData = Array.isArray(initialData) 
+      const formattedInitialData = Array.isArray(initialData)
         ? initialData.map(item => typeof item === 'object' && item.json ? item : { json: item })
         : [{ json: initialData }];
-      
+
       for (const entryNode of entryNodes) {
         await this.executeNode(entryNode, formattedInitialData);
       }
@@ -158,10 +173,11 @@ class WorkflowRunner {
     const { nodes, connections } = workflow;
     const connectedNodeIds = new Set();
     const connectedNodeNames = new Set();
+    const toolSourceNodes = new Set(); // Nodes that provide tools to agents (should not be entry nodes)
 
     // Collect all nodes that have incoming connections (main or special)
     if (connections) {
-      Object.values(connections).forEach(nodeConnections => {
+      Object.entries(connections).forEach(([sourceNodeName, nodeConnections]) => {
         // Check main connections
         if (nodeConnections.main) {
           nodeConnections.main.forEach(outputArray => {
@@ -176,13 +192,13 @@ class WorkflowRunner {
             });
           });
         }
-        
+
         // Check special LangChain connection types
         const specialConnectionTypes = [
-          'ai_textSplitter', 'ai_embedding', 'ai_vectorStore', 
+          'ai_textSplitter', 'ai_embedding', 'ai_vectorStore',
           'ai_tool', 'ai_memory', 'ai_languageModel', 'ai_document'
         ];
-        
+
         for (const connectionType of specialConnectionTypes) {
           if (nodeConnections[connectionType]) {
             nodeConnections[connectionType].forEach(outputArray => {
@@ -193,6 +209,12 @@ class WorkflowRunner {
                   connectedNodeNames.add(targetNode.name);
                   connectedNodeNames.add(targetNode.id);
                 }
+
+                // Track source nodes of ai_tool connections - they should NOT be entry nodes
+                // These are tool providers that should only run when called by an agent
+                if (connectionType === 'ai_tool') {
+                  toolSourceNodes.add(sourceNodeName);
+                }
               });
             });
           }
@@ -201,17 +223,22 @@ class WorkflowRunner {
     }
 
     // Return nodes that are not connected (entry points)
-    // Filter out UI-only nodes like stickyNote
+    // Filter out UI-only nodes like stickyNote and tool source nodes
     return nodes.filter(node => {
       // Skip UI-only nodes
       if (node.type === 'n8n-nodes-base.stickyNote') {
         return false;
       }
-      
-      return !connectedNodeIds.has(node.name) && 
-             !connectedNodeIds.has(node.id) &&
-             !connectedNodeNames.has(node.name) &&
-             !connectedNodeNames.has(node.id);
+
+      // Skip nodes that are sources of ai_tool connections (tool providers)
+      if (toolSourceNodes.has(node.name) || toolSourceNodes.has(node.id)) {
+        return false;
+      }
+
+      return !connectedNodeIds.has(node.name) &&
+        !connectedNodeIds.has(node.id) &&
+        !connectedNodeNames.has(node.name) &&
+        !connectedNodeNames.has(node.id);
     });
   }
 
@@ -251,12 +278,33 @@ class WorkflowRunner {
 
         // Check if all input nodes have been executed
         const canExecute = this.canExecuteNode(nodeName, workflow, executedNodes);
-        
+
         if (canExecute) {
           const node = workflow.nodes.find(n => n.name === nodeName);
           if (node) {
             // Get input data from connected nodes
             const inputData = this.getInputData(nodeName, workflow);
+
+            // Skip execution if node has no input data (e.g., trigger returned empty)
+            // Exception: trigger nodes and webhook nodes can execute with empty input
+            const isTriggerOrWebhook = node.type && (
+              node.type.includes('Trigger') ||
+              node.type.includes('webhook') ||
+              node.type === 'n8n-nodes-base.manualTrigger'
+            );
+
+            if (!isTriggerOrWebhook && inputData.length === 0) {
+              console.log(`[Runner] Skipping node '${node.name}' - no input data from upstream nodes`);
+              // Store empty output to prevent downstream nodes from executing
+              this.executionContext.nodes[nodeName] = [];
+              if (node.id && node.id !== nodeName) {
+                this.executionContext.nodes[node.id] = [];
+              }
+              executedNodes.add(nodeName); // Mark as executed to prevent infinite loop
+              hasChanges = true;
+              continue;
+            }
+
             await this.executeNode(node, inputData);
             executedNodes.add(nodeName);
             hasChanges = true;
@@ -269,9 +317,9 @@ class WorkflowRunner {
       for (const node of workflow.nodes) {
         const nodeName = node.name || node.id;
         // Skip if already executed or is a UI-only node
-        if (executedNodes.has(nodeName) || 
-            executedNodes.has(node.id) ||
-            node.type === 'n8n-nodes-base.stickyNote') {
+        if (executedNodes.has(nodeName) ||
+          executedNodes.has(node.id) ||
+          node.type === 'n8n-nodes-base.stickyNote') {
           continue;
         }
 
@@ -282,10 +330,34 @@ class WorkflowRunner {
 
         // Check if all input nodes have been executed
         const canExecute = this.canExecuteNode(nodeName, workflow, executedNodes);
-        
+
         if (canExecute) {
           // Get input data from connected nodes
           const inputData = this.getInputData(nodeName, workflow);
+
+          // Skip execution if node has no input data (propagate empty from upstream)
+          // This prevents sink nodes from executing when upstream nodes returned no data
+          const isTriggerOrWebhook = node.type && (
+            node.type.includes('Trigger') ||
+            node.type.includes('webhook') ||
+            node.type === 'n8n-nodes-base.manualTrigger'
+          );
+
+          if (!isTriggerOrWebhook && inputData.length === 0) {
+            console.log(`[Runner] Skipping sink node '${node.name}' - no input data from upstream nodes`);
+            // Store empty output to prevent downstream nodes from executing
+            this.executionContext.nodes[nodeName] = [];
+            if (node.id && nodeName !== node.id) {
+              this.executionContext.nodes[node.id] = [];
+            }
+            executedNodes.add(nodeName);
+            if (node.id && nodeName !== node.id) {
+              executedNodes.add(node.id);
+            }
+            hasChanges = true;
+            continue;
+          }
+
           await this.executeNode(node, inputData);
           executedNodes.add(nodeName);
           if (node.id && nodeName !== node.id) {
@@ -303,15 +375,15 @@ class WorkflowRunner {
   canExecuteNode(nodeName, workflow, executedNodes) {
     const { connections } = workflow;
     const node = workflow.nodes.find(n => n.name === nodeName || n.id === nodeName);
-    
+
     // Find all nodes that connect to this node (via main or special connections)
     for (const [sourceNodeName, nodeConnections] of Object.entries(connections)) {
       // Check main connections
       if (nodeConnections.main) {
         for (const outputArray of nodeConnections.main) {
           for (const connection of outputArray) {
-            if (connection.node === nodeName || 
-                (node && (connection.node === node.id || connection.node === node.name))) {
+            if (connection.node === nodeName ||
+              (node && (connection.node === node.id || connection.node === node.name))) {
               // This node depends on sourceNodeName via main connection
               if (!executedNodes.has(sourceNodeName)) {
                 return false;
@@ -320,19 +392,19 @@ class WorkflowRunner {
           }
         }
       }
-      
+
       // Check special LangChain connection types
       const specialConnectionTypes = [
-        'ai_textSplitter', 'ai_embedding', 'ai_vectorStore', 
+        'ai_textSplitter', 'ai_embedding', 'ai_vectorStore',
         'ai_tool', 'ai_memory', 'ai_languageModel', 'ai_document'
       ];
-      
+
       for (const connectionType of specialConnectionTypes) {
         if (nodeConnections[connectionType]) {
           for (const outputArray of nodeConnections[connectionType]) {
             for (const connection of outputArray) {
-              if (connection.node === nodeName || 
-                  (node && (connection.node === node.id || connection.node === node.name))) {
+              if (connection.node === nodeName ||
+                (node && (connection.node === node.id || connection.node === node.name))) {
                 // This node depends on sourceNodeName via special connection
                 if (!executedNodes.has(sourceNodeName)) {
                   return false;
@@ -343,7 +415,7 @@ class WorkflowRunner {
         }
       }
     }
-    
+
     return true;
   }
 
@@ -365,9 +437,9 @@ class WorkflowRunner {
           const outputArray = nodeConnections.main[outputIndex];
           for (const connection of outputArray) {
             // Match by name or id
-            const matchesNode = connection.node === nodeName || 
-                (node && (connection.node === node.id || connection.node === node.name));
-            
+            const matchesNode = connection.node === nodeName ||
+              (node && (connection.node === node.id || connection.node === node.name));
+
             if (matchesNode) {
               const sourceOutput = this.executionContext.nodes[sourceNodeName];
               if (sourceOutput) {
@@ -383,21 +455,21 @@ class WorkflowRunner {
           }
         }
       }
-      
+
       // Check special LangChain connection types
       // These are used for passing data between LangChain nodes
       const specialConnectionTypes = [
-        'ai_textSplitter', 'ai_embedding', 'ai_vectorStore', 
+        'ai_textSplitter', 'ai_embedding', 'ai_vectorStore',
         'ai_tool', 'ai_memory', 'ai_languageModel', 'ai_document'
       ];
-      
+
       for (const connectionType of specialConnectionTypes) {
         if (nodeConnections[connectionType]) {
           for (const outputArray of nodeConnections[connectionType]) {
             for (const connection of outputArray) {
-              const matchesNode = connection.node === nodeName || 
-                  (node && (connection.node === node.id || connection.node === node.name));
-              
+              const matchesNode = connection.node === nodeName ||
+                (node && (connection.node === node.id || connection.node === node.name));
+
               if (matchesNode) {
                 const sourceOutput = this.executionContext.nodes[sourceNodeName];
                 if (sourceOutput && sourceOutput.length > 0) {
@@ -424,7 +496,7 @@ class WorkflowRunner {
     try {
       // Get executor for this node type
       const executor = this.nodeExecutors[node.type];
-      
+
       if (!executor) {
         throw new Error(`No executor found for node type: ${node.type}`);
       }
@@ -439,17 +511,22 @@ class WorkflowRunner {
         this.executionContext.nodes[node.id] = output || [];
       }
 
+      // If this is a trigger node and it returned empty results, log it
+      if (node.type && node.type.includes('Trigger') && (!output || output.length === 0)) {
+        console.log(`[Runner] Trigger node '${node.name}' returned no results - workflow will stop here`);
+      }
+
       return output;
     } catch (error) {
       // Handle errors based on node's error handling settings
       const onError = node.onError || 'stop';
-      
+
       // Check if this is an API key error - for structural testing, continue execution
-      const isApiKeyError = error.message.includes('API_KEY') || 
-                           error.message.includes('API key') ||
-                           error.message.includes('not provided') ||
-                           error.message.includes('access token');
-      
+      const isApiKeyError = error.message.includes('API_KEY') ||
+        error.message.includes('API key') ||
+        error.message.includes('not provided') ||
+        error.message.includes('access token');
+
       if (onError === 'continueErrorOutput' || isApiKeyError) {
         // Continue execution but store error
         this.executionContext.errors.push({

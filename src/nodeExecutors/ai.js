@@ -31,7 +31,9 @@ async function executeLLMChain(node, inputData, executionContext) {
     throw new Error('No model node connected to LLM Chain');
   }
 
-  const model = modelNode.parameters?.model || 'deepseek/deepseek-chat-v3.1:free';
+  // Check if we should use Groq instead of OpenRouter
+  const useGroq = process.env.GROQ_API_KEY && !process.env.PREFER_OPENROUTER;
+  const model = modelNode.parameters?.model || (useGroq ? 'llama-3.3-70b-versatile' : 'deepseek/deepseek-chat-v3.1:free');
   
   // Build messages
   const messages = [];
@@ -58,30 +60,48 @@ async function executeLLMChain(node, inputData, executionContext) {
     });
   }
 
-  // Get API key from injected tokens first, then fall back to environment
-  const apiKey = executionContext.tokens?.openRouterApiKey || 
-                 executionContext.tokenInjector?.getToken('openRouterApiKey') ||
-                 process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error('OPENROUTER_API_KEY not provided. Set it in tokens.openRouterApiKey or OPENROUTER_API_KEY environment variable');
+  // Prefer Groq if available, otherwise use OpenRouter
+  let apiKey, apiUrl, headers;
+  
+  if (useGroq) {
+    apiKey = executionContext.tokens?.groqApiKey || 
+             executionContext.tokenInjector?.getToken('groqApiKey') ||
+             process.env.GROQ_API_KEY;
+    apiUrl = 'https://api.groq.com/openai/v1/chat/completions';
+    headers = {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    };
+    
+    if (!apiKey) {
+      throw new Error('GROQ_API_KEY not provided. Set it in tokens.groqApiKey or GROQ_API_KEY environment variable');
+    }
+  } else {
+    apiKey = executionContext.tokens?.openRouterApiKey || 
+             executionContext.tokenInjector?.getToken('openRouterApiKey') ||
+             process.env.OPENROUTER_API_KEY;
+    apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+    headers = {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://automation-runner.local',
+      'X-Title': 'Automation Runner'
+    };
+    
+    if (!apiKey) {
+      throw new Error('OPENROUTER_API_KEY not provided. Set it in tokens.openRouterApiKey or OPENROUTER_API_KEY environment variable');
+    }
   }
 
   try {
-    // Call OpenRouter API
+    // Call API (Groq or OpenRouter)
     const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
+      apiUrl,
       {
         model: model,
         messages: messages
       },
-      {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': process.env.OPENROUTER_REFERER || 'https://automation-runner.local',
-          'X-Title': 'Automation Runner'
-        }
-      }
+      { headers }
     );
 
     const content = response.data.choices[0]?.message?.content || '';
@@ -90,12 +110,14 @@ async function executeLLMChain(node, inputData, executionContext) {
       json: {
         text: content,
         model: model,
+        provider: useGroq ? 'groq' : 'openrouter',
         usage: response.data.usage
       }
     }];
   } catch (error) {
     if (error.response) {
-      throw new Error(`OpenRouter API error: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+      const provider = useGroq ? 'Groq' : 'OpenRouter';
+      throw new Error(`${provider} API error: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
     }
     throw error;
   }
