@@ -9,11 +9,11 @@ class BackgroundService {
   constructor() {
     this.pollingIntervals = new Map(); // workflowId -> intervalId
     this.lastPollTimes = new Map(); // workflowId -> timestamp
-    
+
     // Initialize Supabase client
     const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
     const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    
+
     if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
       this.supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
       console.log('[BackgroundService] Supabase client initialized');
@@ -30,7 +30,7 @@ class BackgroundService {
    */
   async startPolling(automationId, userId, config = null) {
     const userAutomationKey = `${userId}_${automationId}`;
-    
+
     if (this.pollingIntervals.has(userAutomationKey)) {
       console.log(`[BackgroundService] User automation ${userAutomationKey} is already being polled`);
       return;
@@ -38,7 +38,7 @@ class BackgroundService {
 
     try {
       console.log(`[BackgroundService] Looking for user_automation with user_id=${userId}, automation_id=${automationId}`);
-      
+
       // Load user_automation record (contains user-specific config, state, AND tokens)
       const { data: userAutomation, error: userAutomationError } = await this.supabase
         .from('user_automations')
@@ -47,8 +47,8 @@ class BackgroundService {
         .eq('automation_id', automationId)
         .single();
 
-      console.log(`[BackgroundService] Query result:`, { 
-        found: !!userAutomation, 
+      console.log(`[BackgroundService] Query result:`, {
+        found: !!userAutomation,
         error: userAutomationError?.message,
         hasTokens: !!(userAutomation?.access_token && userAutomation?.refresh_token)
       });
@@ -59,7 +59,7 @@ class BackgroundService {
 
       // Use provided config or fall back to stored parameters
       const userConfig = config || userAutomation.parameters || {};
-      
+
       console.log(`[BackgroundService] User config keys: ${Object.keys(userConfig).join(', ')}`);
 
       // Check if we have OAuth tokens
@@ -94,7 +94,7 @@ class BackgroundService {
       }
 
       // Find trigger node
-      const triggerNode = workflow.nodes.find(node => 
+      const triggerNode = workflow.nodes.find(node =>
         node.type === 'n8n-nodes-base.googleDriveTrigger' ||
         node.type === 'n8n-nodes-base.scheduleTrigger'
       );
@@ -154,12 +154,12 @@ class BackgroundService {
       } catch (testError) {
         // Test failed - clean up and throw error
         console.error(`[BackgroundService] ❌ Initial test poll failed:`, testError);
-        
+
         await this.supabase
           .from('user_automations')
           .update({ is_active: false })
           .eq('id', userAutomation.id);
-        
+
         throw new Error(`Test run failed: ${testError.message}`);
       }
 
@@ -186,12 +186,12 @@ class BackgroundService {
   async stopPolling(automationId, userId) {
     const userAutomationKey = `${userId}_${automationId}`;
     const intervalId = this.pollingIntervals.get(userAutomationKey);
-    
+
     if (intervalId) {
       clearInterval(intervalId);
       this.pollingIntervals.delete(userAutomationKey);
       this.lastPollTimes.delete(userAutomationKey);
-      
+
       if (this.processedFiles) {
         this.processedFiles.delete(userAutomationKey);
       }
@@ -216,9 +216,13 @@ class BackgroundService {
     try {
       const lastPollTime = this.lastPollTimes.get(userAutomationKey);
       const processedFiles = this.processedFiles?.get(userAutomationKey) || new Set();
-      
+
       // Create execution context with last poll time and processed files
       const runner = new WorkflowRunner();
+
+      // Capture start time BEFORE execution to avoid "gap" race condition
+      const executionStartTime = new Date().toISOString();
+
       runner.executionContext = {
         nodes: {},
         currentNode: null,
@@ -238,11 +242,11 @@ class BackgroundService {
         {}
       );
 
-      const newPollTime = new Date().toISOString();
+      const newPollTime = executionStartTime;
       this.lastPollTimes.set(userAutomationKey, newPollTime);
 
       // Check if trigger found new items
-      const triggerNode = workflow.nodes.find(node => 
+      const triggerNode = workflow.nodes.find(node =>
         node.type === 'n8n-nodes-base.googleDriveTrigger' ||
         node.type === 'n8n-nodes-base.scheduleTrigger'
       );
@@ -251,7 +255,7 @@ class BackgroundService {
         const triggerOutput = result.outputs[triggerNode.name] || result.outputs[triggerNode.id];
         if (triggerOutput && triggerOutput.length > 0) {
           console.log(`[BackgroundService] User automation ${userAutomationKey} triggered with ${triggerOutput.length} items`);
-          
+
           // Track processed files
           triggerOutput.forEach(item => {
             if (item.json?.id) {
@@ -270,7 +274,7 @@ class BackgroundService {
           if (this.supabase) {
             await this.supabase
               .from('user_automations')
-              .update({ 
+              .update({
                 automation_data: automationDataUpdate,
                 last_run_at: newPollTime,
                 run_count: this.supabase.raw('COALESCE(run_count, 0) + 1')
@@ -281,7 +285,9 @@ class BackgroundService {
       }
 
       if (!result.success && result.errors.length > 0) {
-        console.error(`[BackgroundService] User automation ${userAutomationKey} execution errors:`, result.errors);
+        const errorMsg = `User automation ${userAutomationKey} execution errors: ${result.errors.join(', ')}`;
+        console.error(`[BackgroundService] ${errorMsg}`);
+        throw new Error(errorMsg);
       }
 
     } catch (error) {
@@ -313,7 +319,7 @@ class BackgroundService {
 
       // Update user_automations with new access token
       const newExpiry = new Date(Date.now() + (data.expires_in * 1000));
-      
+
       await this.supabase
         .from('user_automations')
         .update({
@@ -350,7 +356,7 @@ class BackgroundService {
       if (!error && integrations) {
         integrations.forEach(integration => {
           const provider = integration.provider?.toLowerCase();
-          
+
           if (provider === 'google') {
             if (integration.access_token) tokens.googleAccessToken = integration.access_token;
             if (integration.refresh_token) tokens.googleRefreshToken = integration.refresh_token;

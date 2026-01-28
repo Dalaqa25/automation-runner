@@ -566,6 +566,10 @@ app.post('/api/automations/run', async (req, res) => {
     // Step 7: Execute workflow once (no scheduling for now)
     const runner = new WorkflowRunner();
 
+    // Capture start time BEFORE execution to avoid missing files that arrive during execution
+    // This fixes the "gap" race condition
+    const executionStartTime = new Date().toISOString();
+
     // Pre-set execution context data that needs to persist
     // (will be merged into the context created by execute())
     runner.lastPollTime = lastPollTime;
@@ -579,8 +583,29 @@ app.post('/api/automations/run', async (req, res) => {
       {} // No custom token mapping needed
     );
 
+    // Find the trigger node name dynamically to be robust against renames
+    const triggerNode = workflow.nodes.find(n => n.type === 'n8n-nodes-base.googleDriveTrigger');
+    const triggerNodeName = triggerNode ? triggerNode.name : 'When Invoices Are Uploaded';
+
+    // Get trigger output to track properly processed files
+    const triggerOutput = result.outputs?.[triggerNodeName] || [];
+
+    // Check if this was a "no new files" scenario
+    const noNewFiles = triggerOutput.length === 0;
+
+    // Add newly found files to processedFiles tracking
+    if (triggerOutput.length > 0) {
+      triggerOutput.forEach(item => {
+        if (item.json && item.json.id) {
+          processedFiles.add(item.json.id);
+        }
+      });
+      console.log(`[Orchestration] Added ${triggerOutput.length} new files to tracking`);
+    }
+
     // Step 8: Update automation_data with new processed files
-    const newPollTime = new Date().toISOString();
+    // Use executionStartTime instead of "now" to ensure we cover the execution window next time
+    const newPollTime = executionStartTime;
     const updatedAutomationData = {
       lastPollTime: newPollTime,
       processedFiles: Array.from(processedFiles),
@@ -615,8 +640,7 @@ app.post('/api/automations/run', async (req, res) => {
     }
 
     // Check if this was a "no new files" scenario (not an actual error)
-    const triggerOutput = result.outputs?.['When Invoices Are Uploaded'] || [];
-    const noNewFiles = triggerOutput.length === 0;
+    // triggerOutput and noNewFiles are already defined above
 
     // If trigger found no files and there are no other errors, consider it success
     const actualSuccess = noNewFiles ? true : result.success;
@@ -1112,6 +1136,45 @@ app.listen(PORT, () => {
   console.log(`   GET /schedules - List all scheduled workflows`);
   console.log(`   DELETE /schedule/:jobKey - Remove scheduled workflow`);
   console.log(`   GET /health - Health check`);
+
+  // Resume polling for active automations
+  if (supabase) {
+    (async () => {
+      console.log('\n🔄 Checking for active automations to resume polling...');
+      const { data: activeAutomations, error } = await supabase
+        .from('user_automations')
+        .select('automation_id, user_id, parameters')
+        .eq('is_active', true);
+
+      if (error) {
+        console.error('❌ Failed to fetch active automations:', error);
+        return;
+      }
+
+      if (activeAutomations && activeAutomations.length > 0) {
+        console.log(`Found ${activeAutomations.length} active automations to resume`);
+        const backgroundService = getBackgroundService();
+
+        for (const automation of activeAutomations) {
+          try {
+            // Add a small delay between starts to prevent flooding
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            await backgroundService.startPolling(
+              automation.automation_id,
+              automation.user_id,
+              automation.parameters
+            );
+            console.log(`✅ Resumed polling for ${automation.automation_id} (User: ${automation.user_id})`);
+          } catch (err) {
+            console.error(`❌ Failed to resume polling for ${automation.automation_id}:`, err.message);
+          }
+        }
+      } else {
+        console.log('No active automations found to resume');
+      }
+    })();
+  }
 });
 
 // Cleanup on shutdown
