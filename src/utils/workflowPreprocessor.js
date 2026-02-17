@@ -26,7 +26,7 @@ class WorkflowPreprocessor {
 
     // Process each node
     if (processedWorkflow.nodes) {
-      processedWorkflow.nodes = processedWorkflow.nodes.map(node => 
+      processedWorkflow.nodes = processedWorkflow.nodes.map(node =>
         this.processNode(node)
       );
     }
@@ -41,6 +41,16 @@ class WorkflowPreprocessor {
    */
   processNode(node) {
     if (!node.parameters) {
+      return node;
+    }
+
+    // Don't inject credentials into trigger nodes — they don't need them
+    // and injecting pollutes their output data (tokens leak into rule.interval etc.)
+    if (node.type && (
+      node.type.includes('scheduleTrigger') ||
+      node.type.includes('manualTrigger') ||
+      node.type.includes('webhookTrigger')
+    )) {
       return node;
     }
 
@@ -153,7 +163,7 @@ class WorkflowPreprocessor {
       { pattern: 'accessToken', tokens: ['googleAccessToken', 'slackBotToken'] },
       { pattern: 'access_token', tokens: ['googleAccessToken', 'slackBotToken'] },
       { pattern: 'token', tokens: ['googleAccessToken', 'slackBotToken', 'openAiApiKey'] },
-      
+
       // Node-specific patterns
       { pattern: 'openRouterApiKey', tokens: ['openRouterApiKey'] },
       { pattern: 'openAiApiKey', tokens: ['openAiApiKey'] },

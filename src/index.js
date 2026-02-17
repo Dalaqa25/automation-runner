@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('dotenv').config({ path: '.env.local' });
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
@@ -12,6 +13,8 @@ const {
   listScheduledWorkflows
 } = require('./queue');
 const { resolveCredentials } = require('./utils/credentialResolver');
+const { injectParameters, extractParameterNames } = require('./utils/parameterInjector');
+const { refreshTokenIfNeeded } = require('./tokenRefresh'); // Import the new refresh module
 const { getBackgroundService } = require('./backgroundService');
 
 const app = express();
@@ -268,18 +271,39 @@ app.post('/execute', async (req, res) => {
  *   workflow: {...},
  *   initialData: {...},
  *   tokens: {...},
- *   tokenMapping: {...}  // Optional: custom token name mapping
+ *   tokenMapping: {...},  // Optional: custom token name mapping
+ *   delay: 0  // Optional: delay in milliseconds before execution (default: 0, max: 30 days)
  * }
  */
 app.post('/queue', async (req, res) => {
   try {
-    const { workflow, initialData, tokens, tokenMapping } = req.body;
+    const { workflow, initialData, tokens, tokenMapping, delay } = req.body;
 
     if (!workflow) {
       return res.status(400).json({ error: 'Workflow is required' });
     }
 
+    // Validate delay if provided
+    if (delay !== undefined) {
+      if (typeof delay !== 'number' || delay < 0) {
+        return res.status(400).json({ 
+          error: 'Delay must be a non-negative number (milliseconds)' 
+        });
+      }
+      
+      const MAX_DELAY = 30 * 24 * 60 * 60 * 1000; // 30 days
+      if (delay > MAX_DELAY) {
+        return res.status(400).json({ 
+          error: `Delay cannot exceed 30 days (${MAX_DELAY}ms)` 
+        });
+      }
+    }
+
     console.log(`[API] Queuing workflow: ${workflow.name || 'unnamed'}`);
+    if (delay) {
+      const delayHours = (delay / (1000 * 60 * 60)).toFixed(2);
+      console.log(`[API] Delayed execution: ${delayHours} hours`);
+    }
     if (tokens) {
       const tokenKeys = Object.keys(tokens).filter(key => tokens[key] !== null);
       console.log(`[API] Injecting tokens: ${tokenKeys.join(', ')}`);
@@ -292,14 +316,21 @@ app.post('/queue', async (req, res) => {
       workflow,
       initialData || {},
       tokens || {},
-      tokenMapping || {}
+      tokenMapping || {},
+      delay || 0
     );
 
-    res.json({
+    const response = {
       success: true,
       jobId,
-      message: 'Workflow queued successfully'
-    });
+      message: delay ? 'Workflow scheduled successfully' : 'Workflow queued successfully'
+    };
+    
+    if (delay) {
+      response.scheduledFor = new Date(Date.now() + delay).toISOString();
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('[API] Queue error:', error);
     res.status(500).json({
@@ -380,7 +411,7 @@ app.post('/api/automations/run', async (req, res) => {
 
     const { data: instanceData, error: instanceError } = await supabase
       .from('user_automations')
-      .select('id, automation_id, user_id, parameters, is_active, access_token, refresh_token, token_expiry, automation_data, run_count')
+      .select('id, automation_id, user_id, provider, parameters, is_active, access_token, refresh_token, token_expiry, automation_data, run_count')
       .eq('user_id', user_id)
       .eq('automation_id', automation_id)
       .single();
@@ -469,65 +500,45 @@ app.post('/api/automations/run', async (req, res) => {
     if (developerKeys.SMTP_USER) tokens.smtpUser = developerKeys.SMTP_USER;
     if (developerKeys.SMTP_PASSWORD) tokens.smtpPassword = developerKeys.SMTP_PASSWORD;
 
-    // Step 4: Add user OAuth tokens from user_automations (stored directly in the record)
-    if (instanceData.access_token) {
-      tokens.googleAccessToken = instanceData.access_token;
-      console.log(`[Orchestration] Loaded Google access token from user_automations`);
-    }
-    if (instanceData.refresh_token) {
-      tokens.googleRefreshToken = instanceData.refresh_token;
-      console.log(`[Orchestration] Loaded Google refresh token from user_automations`);
-    }
+    // Check for token refresh before using them
+    // This handles both Google and TikTok refreshes
+    let validAccessToken = instanceData.access_token;
+    let validRefreshToken = instanceData.refresh_token;
 
-    // Check if token is expired and needs refresh
-    if (instanceData.token_expiry) {
-      const tokenExpiry = new Date(instanceData.token_expiry);
-      const isExpired = tokenExpiry < new Date();
-
-      if (isExpired && instanceData.refresh_token) {
-        console.log(`[Orchestration] Access token expired, refreshing...`);
-
-        try {
-          // Refresh the token using Google OAuth2
-          const refreshResponse = await fetch('https://oauth2.googleapis.com/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              client_id: process.env.GOOGLE_CLIENT_ID,
-              client_secret: process.env.GOOGLE_CLIENT_SECRET,
-              refresh_token: instanceData.refresh_token,
-              grant_type: 'refresh_token'
-            })
-          });
-
-          const refreshData = await refreshResponse.json();
-
-          if (!refreshResponse.ok) {
-            throw new Error(`Token refresh failed: ${refreshData.error_description || refreshData.error}`);
-          }
-
-          // Update tokens in memory for this execution
-          tokens.googleAccessToken = refreshData.access_token;
-
-          // Update database with new token
-          const newExpiry = new Date(Date.now() + (refreshData.expires_in * 1000));
-          await supabase
-            .from('user_automations')
-            .update({
-              access_token: refreshData.access_token,
-              token_expiry: newExpiry.toISOString()
-            })
-            .eq('id', instanceData.id);
-
-          console.log(`[Orchestration] Token refreshed successfully, expires at ${newExpiry.toISOString()}`);
-        } catch (refreshError) {
-          console.error(`[Orchestration] Token refresh failed:`, refreshError.message);
-          return res.status(401).json({
-            success: false,
-            error: `Google authentication expired and refresh failed: ${refreshError.message}. User needs to re-authenticate.`
-          });
-        }
+    try {
+      const refreshResult = await refreshTokenIfNeeded(instanceData, supabase);
+      if (refreshResult.refreshed) {
+        validAccessToken = refreshResult.accessToken;
+        validRefreshToken = refreshResult.refreshToken;
+        console.log(`[Orchestration] Using refreshed tokens for provider: ${instanceData.provider}`);
       }
+    } catch (refreshErr) {
+      console.error(`[Orchestration] Token refresh failed: ${refreshErr.message}`);
+      // Continue with old tokens if refresh fails, or throw? 
+      // Existing behavior was to fail for Google, so let's fail here too if it was a required refresh
+      // But refreshTokenIfNeeded uses token_expiry check. If it threw, it means it tried and failed.
+      return res.status(401).json({
+        success: false,
+        error: `Authentication refresh failed: ${refreshErr.message}. User needs to re-authenticate.`
+      });
+    }
+
+    // Step 4: Add user OAuth tokens
+    // Provider-aware: only set googleAccessToken for Google providers
+    const orchProviderName = (instanceData.provider || '').toLowerCase();
+    if (validAccessToken) {
+      tokens.accessToken = validAccessToken;
+      if (!orchProviderName.includes('tiktok')) {
+        tokens.googleAccessToken = validAccessToken; // Only for Google/default providers
+      }
+      console.log(`[Orchestration] Loaded access token (provider: ${orchProviderName || 'default'})`);
+    }
+    if (validRefreshToken) {
+      tokens.refreshToken = validRefreshToken;
+      if (!orchProviderName.includes('tiktok')) {
+        tokens.googleRefreshToken = validRefreshToken; // Only for Google/default providers
+      }
+      console.log(`[Orchestration] Loaded refresh token (provider: ${orchProviderName || 'default'})`);
     }
 
     const tokenKeys = Object.keys(tokens);
@@ -542,12 +553,16 @@ app.post('/api/automations/run', async (req, res) => {
 
     // Step 6: Nest userConfig under body for webhook structure
     // This creates the initial data that webhook nodes expect
+    const { body: _ignoredBody, headers: _ignoredHeaders, query: _ignoredQuery, ...flatConfig } = userConfig;
+
     const initialData = {
+      // Expose config at top-level for schedule-triggered workflows
+      ...flatConfig,
       body: {
-        ...userConfig,
+        ...flatConfig,
         // Add tokens to body for workflows that expect them
-        access_token: tokens.googleAccessToken || null,
-        refresh_token: tokens.googleRefreshToken || null,
+        access_token: tokens.accessToken || tokens.googleAccessToken || null,
+        refresh_token: tokens.refreshToken || tokens.googleRefreshToken || null,
         openrouter_api_key: tokens.openRouterApiKey || null,
         openai_api_key: tokens.openAiApiKey || null,
         anthropic_api_key: tokens.anthropicApiKey || null,
@@ -682,11 +697,22 @@ app.post('/api/automations/run', async (req, res) => {
  */
 app.post('/schedule', async (req, res) => {
   try {
-    const { workflow, initialData, tokens, tokenMapping, cronExpression } = req.body;
+    const {
+      workflow,
+      initialData,
+      tokens,
+      tokenMapping,
+      cronExpression,
+      automation_id,
+      user_id,
+      config = {},
+      maxRuns = null
+    } = req.body;
 
-    if (!workflow) {
-      return res.status(400).json({ error: 'Workflow is required' });
-    }
+    // Safe logging (avoid dumping secrets)
+    const configKeys = config && typeof config === 'object' ? Object.keys(config) : [];
+    console.log(`[API] /schedule called from: ${req.headers.origin || 'unknown'}`);
+    console.log(`[API] /schedule payload: automation_id=${automation_id || 'n/a'}, user_id=${user_id || 'n/a'}, cron=${cronExpression || 'n/a'}, maxRuns=${maxRuns || 'unlimited'}, hasWorkflow=${!!workflow}, hasTokens=${!!tokens}, hasTokenMapping=${!!tokenMapping}, configKeys=${configKeys.join(', ') || 'none'}, prefix=${config?.prefix || 'n/a'}`);
 
     if (!cronExpression) {
       return res.status(400).json({
@@ -700,19 +726,180 @@ app.post('/schedule', async (req, res) => {
       });
     }
 
-    console.log(`[API] Scheduling workflow: ${workflow.name || 'unnamed'}`);
+    let workflowToSchedule = workflow;
+    let initialDataToSchedule = initialData || {};
+    let tokensToSchedule = tokens || {};
+    let tokenMappingToSchedule = tokenMapping || {};
+
+    if (!workflowToSchedule) {
+      if (!automation_id || !user_id) {
+        return res.status(400).json({
+          error: 'workflow OR (automation_id and user_id) is required'
+        });
+      }
+
+      if (!supabase) {
+        return res.status(500).json({
+          success: false,
+          error: 'Database not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
+        });
+      }
+
+      console.log(`[API] Scheduling automation: ${automation_id} for user: ${user_id}`);
+
+      const { data: instanceData, error: instanceError } = await supabase
+        .from('user_automations')
+        .select('id, automation_id, user_id, provider, parameters, access_token, refresh_token, token_expiry')
+        .eq('user_id', user_id)
+        .eq('automation_id', automation_id)
+        .single();
+
+      if (instanceError || !instanceData) {
+        console.error('[API] Failed to fetch user_automation:', instanceError);
+        return res.status(404).json({
+          success: false,
+          error: `No user automation found for user ${user_id} and automation ${automation_id}.`
+        });
+      }
+
+      const { data: automationData, error: automationError } = await supabase
+        .from('automations')
+        .select('workflow, developer_keys')
+        .eq('id', automation_id)
+        .single();
+
+      if (automationError || !automationData) {
+        console.error('[API] Failed to fetch automation:', automationError);
+        return res.status(404).json({
+          success: false,
+          error: `Automation template not found: ${automation_id}`
+        });
+      }
+
+      let workflowTemplate = automationData.workflow;
+      if (typeof workflowTemplate === 'string') {
+        try {
+          workflowTemplate = JSON.parse(workflowTemplate);
+        } catch (parseError) {
+          console.error('[API] Failed to parse workflow JSON:', parseError);
+          return res.status(500).json({
+            success: false,
+            error: 'Invalid workflow JSON format'
+          });
+        }
+      }
+
+      const userConfig = config && Object.keys(config).length > 0 ? config : (instanceData.parameters || {});
+      const developerKeys = automationData.developer_keys || {};
+
+      const { workflow: resolvedWorkflow, resolvedCredentials } = resolveCredentials(workflowTemplate, developerKeys);
+      workflowTemplate = resolvedWorkflow;
+
+      const requiredParams = Array.from(extractParameterNames(workflowTemplate));
+      const missing = requiredParams.filter(
+        (name) => !Object.prototype.hasOwnProperty.call(userConfig, name)
+      );
+      if (missing.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing parameters',
+          missing
+        });
+      }
+
+      workflowToSchedule = injectParameters(workflowTemplate, userConfig);
+
+      const tokensLocal = { ...resolvedCredentials };
+      if (developerKeys.OPEN_ROUTER_API_KEY && !tokensLocal.openRouterApiKey) {
+        tokensLocal.openRouterApiKey = developerKeys.OPEN_ROUTER_API_KEY;
+      }
+      if (developerKeys.OPENAI_API_KEY && !tokensLocal.openAiApiKey) {
+        tokensLocal.openAiApiKey = developerKeys.OPENAI_API_KEY;
+      }
+      if (developerKeys.ANTHROPIC_API_KEY && !tokensLocal.anthropicApiKey) {
+        tokensLocal.anthropicApiKey = developerKeys.ANTHROPIC_API_KEY;
+      }
+      if (developerKeys.HUGGINGFACE_API_KEY && !tokensLocal.huggingFaceApiKey) {
+        tokensLocal.huggingFaceApiKey = developerKeys.HUGGINGFACE_API_KEY;
+      }
+      if (developerKeys.GROQ_API_KEY && !tokensLocal.groqApiKey) {
+        tokensLocal.groqApiKey = developerKeys.GROQ_API_KEY;
+      }
+      if (developerKeys.SMTP_HOST) tokensLocal.smtpHost = developerKeys.SMTP_HOST;
+      if (developerKeys.SMTP_PORT) tokensLocal.smtpPort = developerKeys.SMTP_PORT;
+      if (developerKeys.SMTP_USER) tokensLocal.smtpUser = developerKeys.SMTP_USER;
+      if (developerKeys.SMTP_PASSWORD) tokensLocal.smtpPassword = developerKeys.SMTP_PASSWORD;
+
+      // Provider-aware: only set googleAccessToken for Google providers, not TikTok etc.
+      const schedProviderName = (instanceData.provider || '').toLowerCase();
+
+      // Attempt refresh before assignment
+      let validAccessToken = instanceData.access_token;
+      let validRefreshToken = instanceData.refresh_token;
+
+      try {
+        const refreshResult = await refreshTokenIfNeeded(instanceData, supabase);
+        if (refreshResult.refreshed) {
+          validAccessToken = refreshResult.accessToken;
+          validRefreshToken = refreshResult.refreshToken;
+          console.log(`[Schedule] Using refreshed tokens for provider: ${instanceData.provider}`);
+        }
+      } catch (refreshErr) {
+        console.error(`[Schedule] Token refresh failed: ${refreshErr.message}`);
+        // For schedule, we log error but maybe try to proceed with old tokens? 
+        // Or fail? If it failed it likely means it processed the request and got an error.
+        // Let's log heavily.
+      }
+
+      if (validAccessToken) {
+        tokensLocal.accessToken = validAccessToken;
+        if (!schedProviderName.includes('tiktok')) {
+          tokensLocal.googleAccessToken = validAccessToken; // Only for Google/default providers
+        }
+      }
+      if (validRefreshToken) {
+        tokensLocal.refreshToken = validRefreshToken;
+        if (!schedProviderName.includes('tiktok')) {
+          tokensLocal.googleRefreshToken = validRefreshToken; // Only for Google/default providers
+        }
+      }
+
+      const { body: _ignoredBody, headers: _ignoredHeaders, query: _ignoredQuery, ...flatConfig } = userConfig;
+      initialDataToSchedule = {
+        ...flatConfig,
+        body: {
+          ...flatConfig,
+          access_token: tokensLocal.accessToken || tokensLocal.googleAccessToken || null,
+          refresh_token: tokensLocal.refreshToken || tokensLocal.googleRefreshToken || null,
+          openrouter_api_key: tokensLocal.openRouterApiKey || null,
+          openai_api_key: tokensLocal.openAiApiKey || null,
+          anthropic_api_key: tokensLocal.anthropicApiKey || null,
+          slack_token: tokensLocal.slackToken || null
+        },
+        headers: {
+          'content-type': 'application/json',
+          'user-agent': 'automation-runner'
+        },
+        query: {}
+      };
+
+      tokensToSchedule = tokensLocal;
+    }
+
+    console.log(`[API] Scheduling workflow: ${workflowToSchedule.name || 'unnamed'}`);
     console.log(`[API] Schedule: ${cronExpression}`);
-    if (tokens) {
-      const tokenKeys = Object.keys(tokens).filter(key => tokens[key] !== null);
+    if (tokensToSchedule) {
+      const tokenKeys = Object.keys(tokensToSchedule).filter(key => tokensToSchedule[key] !== null);
       console.log(`[API] Injecting tokens: ${tokenKeys.join(', ')}`);
     }
 
     const scheduleInfo = await scheduleWorkflow(
-      workflow,
-      initialData || {},
-      tokens || {},
-      tokenMapping || {},
-      cronExpression
+      workflowToSchedule,
+      initialDataToSchedule || {},
+      tokensToSchedule || {},
+      tokenMappingToSchedule || {},
+      cronExpression,
+      maxRuns
     );
 
     res.json({
@@ -1191,4 +1378,3 @@ process.on('SIGINT', () => {
   backgroundService.stopAll();
   process.exit(0);
 });
-

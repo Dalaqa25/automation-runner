@@ -7,7 +7,7 @@ const { evaluateExpression, evaluateExpressionValue } = require('../utils/expres
  */
 async function execute(node, inputData, executionContext) {
   const params = node.parameters || {};
-  
+
   // Evaluate dynamic expressions in parameters
   const url = evaluateExpression(params.url || '', {
     currentInput: inputData,
@@ -33,7 +33,7 @@ async function execute(node, inputData, executionContext) {
   }
 
   const method = (params.method || params.httpMethod || 'GET').toUpperCase();
-  
+
   // Build headers
   const headers = {};
   if (params.sendHeaders && params.headerParameters?.parameters) {
@@ -43,6 +43,17 @@ async function execute(node, inputData, executionContext) {
         executionContext
       });
       headers[header.name] = headerValue;
+      
+      // Debug: log Authorization header evaluation
+      if (header.name === 'Authorization') {
+        console.log(`[HTTP] Authorization header: original="${header.value}", evaluated="${headerValue}"`);
+        console.log(`[HTTP] Available tokens:`, Object.keys(executionContext?.tokens || {}).join(', '));
+      }
+      
+      // Debug: log Content-Range header evaluation
+      if (header.name === 'Content-Range') {
+        console.log(`[HTTP] Content-Range header: original="${header.value}", evaluated="${headerValue}"`);
+      }
     }
   }
 
@@ -72,7 +83,28 @@ async function execute(node, inputData, executionContext) {
       if (inputData && inputData.length > 0) {
         const inputField = params.inputDataFieldName || 'data';
         const binaryData = inputData[0][inputField] || inputData[0].data;
-        config.data = binaryData;
+        
+        if (Buffer.isBuffer(binaryData)) {
+          config.data = binaryData;
+          
+          // For binary uploads, ensure Content-Length is accurate
+          // Remove any manually set Content-Length and let axios handle it
+          const manualContentLength = headers['Content-Length'] || headers['content-length'];
+          if (manualContentLength) {
+            console.log(`[HTTP] Manual Content-Length: ${manualContentLength}, Actual buffer size: ${binaryData.length}`);
+            // Remove manual Content-Length - axios will set it correctly
+            delete headers['Content-Length'];
+            delete headers['content-length'];
+          }
+          
+          // Set maxBodyLength and maxContentLength to handle large files
+          config.maxBodyLength = Infinity;
+          config.maxContentLength = Infinity;
+          
+          console.log(`[HTTP] Uploading binary data: ${binaryData.length} bytes`);
+        } else {
+          config.data = binaryData;
+        }
       }
     } else if (params.bodyParameters?.parameters) {
       // Form/JSON body parameters
@@ -136,17 +168,32 @@ async function execute(node, inputData, executionContext) {
 
       config.data = body;
     } else if (params.jsonBody) {
-      // Raw JSON body
-      try {
-        config.data = JSON.parse(params.jsonBody);
-      } catch (e) {
-        config.data = params.jsonBody;
+      // Raw JSON body (allow expressions)
+      const expressionContext = {
+        currentInput: inputData,
+        executionContext
+      };
+
+      let bodyValue = params.jsonBody;
+      if (typeof bodyValue === 'string') {
+        bodyValue = evaluateExpression(bodyValue, expressionContext);
+      }
+
+      if (typeof bodyValue === 'string') {
+        try {
+          config.data = JSON.parse(bodyValue);
+        } catch (e) {
+          config.data = bodyValue;
+        }
+      } else {
+        config.data = bodyValue;
       }
     }
   }
 
-  // Handle response format
-  const responseFormat = params.options?.response?.response?.responseFormat || 'json';
+  // Handle response format - check both nested (options.response.response.responseFormat)
+  // and flat (params.responseFormat) locations since different n8n versions use different structures
+  const responseFormat = params.responseFormat || params.options?.response?.response?.responseFormat || 'json';
   const fullResponse = params.options?.response?.response?.fullResponse || false;
 
   if (responseFormat === 'file') {
@@ -167,10 +214,19 @@ async function execute(node, inputData, executionContext) {
       throw new Error(`Invalid URL: "${url}" (evaluated from: "${params.url}")`);
     }
 
+    // Log request details for debugging
+    if (config.data && Buffer.isBuffer(config.data)) {
+      console.log(`[HTTP] ${method} ${url}`);
+      console.log(`[HTTP] Headers:`, JSON.stringify(headers, null, 2));
+      console.log(`[HTTP] Body: [Binary ${config.data.length} bytes]`);
+    }
+
     const response = await axios(config);
 
     // Format output based on response format
     if (responseFormat === 'file') {
+      const byteLen = response.data && response.data.length ? response.data.length : 0;
+      console.log(`[HTTP] Downloaded ${byteLen} bytes from ${method} ${url}`);
       // Return binary data
       // Use 'httpStatus' instead of 'status' to avoid conflicts with workflow data
       return [{
@@ -184,24 +240,30 @@ async function execute(node, inputData, executionContext) {
     } else if (fullResponse) {
       // Return full response object
       // Use 'httpStatus' instead of 'status' to avoid conflicts with workflow data
+      const carryData = inputData && inputData[0] && inputData[0].data ? inputData[0].data : undefined;
       return [{
         json: {
           data: response.data,
           headers: response.headers,
           httpStatus: response.status,  // Renamed to prevent field conflicts
           statusText: response.statusText
-        }
+        },
+        ...(carryData ? { data: carryData } : {})
       }];
     } else {
       // Return just the data
+      const carryData = inputData && inputData[0] && inputData[0].data ? inputData[0].data : undefined;
       return [{
-        json: response.data
+        json: response.data,
+        ...(carryData ? { data: carryData } : {})
       }];
     }
   } catch (error) {
     if (error.response) {
       // HTTP error response
       // Use 'httpStatus' instead of 'status' to avoid conflicts
+      console.error(`[HTTP] Request failed: ${method} ${url} -> ${error.response.status}`);
+      console.error(`[HTTP] Error details:`, JSON.stringify(error.response.data, null, 2));
       return [{
         json: {
           error: error.message,
@@ -221,4 +283,3 @@ async function execute(node, inputData, executionContext) {
 module.exports = {
   execute
 };
-

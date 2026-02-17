@@ -13,6 +13,10 @@ class TokenInjector {
     const mappedTokens = this.tokenMapper.mapTokens(tokens);
     
     this.tokens = {
+      // Generic OAuth tokens (for TikTok, etc.)
+      accessToken: mappedTokens.accessToken || null,
+      refreshToken: mappedTokens.refreshToken || null,
+      
       // Google OAuth tokens
       googleAccessToken: mappedTokens.googleAccessToken || null,
       googleRefreshToken: mappedTokens.googleRefreshToken || null,
