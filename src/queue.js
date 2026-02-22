@@ -2,11 +2,14 @@ const { Queue, Worker } = require('bullmq');
 const WorkflowRunner = require('./runner');
 
 // Redis connection (can be configured via environment variables)
-const redisConnection = {
-  host: process.env.REDIS_HOST || 'localhost',
-  port: process.env.REDIS_PORT || 6379,
-  password: process.env.REDIS_PASSWORD
-};
+// In production (Railway), use REDIS_URL. In local dev, fall back to localhost.
+const redisConnection = process.env.REDIS_URL 
+  ? { url: process.env.REDIS_URL }
+  : {
+      host: process.env.REDIS_HOST || 'localhost',
+      port: process.env.REDIS_PORT || 6379,
+      password: process.env.REDIS_PASSWORD
+    };
 
 // Create queue
 const workflowQueue = new Queue('workflow-execution', {
