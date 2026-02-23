@@ -1,6 +1,9 @@
 // Debug script to check Redis connection configuration
 require('dotenv').config();
-require('dotenv').config({ path: '.env.local' });
+// Only load .env.local in development
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config({ path: '.env.local' });
+}
 
 console.log('=== Redis Configuration Debug ===');
 console.log('REDIS_URL:', process.env.REDIS_URL ? 'SET' : 'NOT SET');

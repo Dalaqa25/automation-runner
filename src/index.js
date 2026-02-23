@@ -1,5 +1,8 @@
 require('dotenv').config();
-require('dotenv').config({ path: '.env.local' });
+// Only load .env.local in development (not in production/Railway)
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config({ path: '.env.local' });
+}
 const express = require('express');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
