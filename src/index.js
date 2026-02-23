@@ -1,6 +1,7 @@
 require('dotenv').config();
-// Only load .env.local in development (not in production/Railway)
-if (process.env.NODE_ENV !== 'production') {
+// Only load .env.local in development (not in Railway/production)
+// Railway sets RAILWAY_ENVIRONMENT, so skip .env.local if that exists
+if (!process.env.RAILWAY_ENVIRONMENT && process.env.NODE_ENV !== 'production') {
   require('dotenv').config({ path: '.env.local' });
 }
 const express = require('express');

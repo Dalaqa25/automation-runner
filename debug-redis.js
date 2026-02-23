@@ -1,7 +1,7 @@
 // Debug script to check Redis connection configuration
 require('dotenv').config();
-// Only load .env.local in development
-if (process.env.NODE_ENV !== 'production') {
+// Only load .env.local in development (not in Railway/production)
+if (!process.env.RAILWAY_ENVIRONMENT && process.env.NODE_ENV !== 'production') {
   require('dotenv').config({ path: '.env.local' });
 }
 
