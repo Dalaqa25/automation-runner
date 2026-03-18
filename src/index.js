@@ -504,6 +504,14 @@ app.post('/api/automations/run', async (req, res) => {
     if (developerKeys.SMTP_USER) tokens.smtpUser = developerKeys.SMTP_USER;
     if (developerKeys.SMTP_PASSWORD) tokens.smtpPassword = developerKeys.SMTP_PASSWORD;
 
+    // Add Supabase credentials from environment
+    if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      tokens.supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    }
+    if (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+      tokens.supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    }
+
     // Check for token refresh before using them
     // This handles both Google and TikTok refreshes
     let validAccessToken = instanceData.access_token;
@@ -560,6 +568,9 @@ app.post('/api/automations/run', async (req, res) => {
     const { body: _ignoredBody, headers: _ignoredHeaders, query: _ignoredQuery, ...flatConfig } = userConfig;
 
     const initialData = {
+      // Add user_id and automation_id for workflow nodes that need them
+      user_id: user_id,
+      automation_id: automation_id,
       // Expose config at top-level for schedule-triggered workflows
       ...flatConfig,
       body: {

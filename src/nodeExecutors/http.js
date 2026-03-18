@@ -166,6 +166,9 @@ async function execute(node, inputData, executionContext) {
         headers['Content-Type'] = 'application/json';
       }
 
+      // Debug: log the body being sent
+      console.log(`[HTTP] Request body (bodyParameters):`, JSON.stringify(body, null, 2));
+
       config.data = body;
     } else if (params.jsonBody) {
       // Raw JSON body (allow expressions)
