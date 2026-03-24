@@ -497,6 +497,9 @@ app.post('/api/automations/run', async (req, res) => {
     if (developerKeys.GROQ_API_KEY && !tokens.groqApiKey) {
       tokens.groqApiKey = developerKeys.GROQ_API_KEY;
     }
+    if (developerKeys.GOOGLE_PALM_API_KEY && !tokens.googlePalmApiKey) {
+      tokens.googlePalmApiKey = developerKeys.GOOGLE_PALM_API_KEY;
+    }
 
     // Add SMTP credentials from developer keys (if provided)
     if (developerKeys.SMTP_HOST) tokens.smtpHost = developerKeys.SMTP_HOST;
@@ -551,6 +554,13 @@ app.post('/api/automations/run', async (req, res) => {
         tokens.googleRefreshToken = validRefreshToken; // Only for Google/default providers
       }
       console.log(`[Orchestration] Loaded refresh token (provider: ${orchProviderName || 'default'})`);
+    }
+
+    // LinkedIn-specific: map the access token for LinkedIn provider
+    if (orchProviderName.includes('linkedin') && validAccessToken) {
+      tokens.linkedInAccessToken = validAccessToken;
+      tokens.linkedinAccessToken = validAccessToken;
+      console.log(`[Orchestration] Mapped LinkedIn access token`);
     }
 
     const tokenKeys = Object.keys(tokens);
@@ -840,6 +850,9 @@ app.post('/schedule', async (req, res) => {
       if (developerKeys.GROQ_API_KEY && !tokensLocal.groqApiKey) {
         tokensLocal.groqApiKey = developerKeys.GROQ_API_KEY;
       }
+      if (developerKeys.GOOGLE_PALM_API_KEY && !tokensLocal.googlePalmApiKey) {
+        tokensLocal.googlePalmApiKey = developerKeys.GOOGLE_PALM_API_KEY;
+      }
       if (developerKeys.SMTP_HOST) tokensLocal.smtpHost = developerKeys.SMTP_HOST;
       if (developerKeys.SMTP_PORT) tokensLocal.smtpPort = developerKeys.SMTP_PORT;
       if (developerKeys.SMTP_USER) tokensLocal.smtpUser = developerKeys.SMTP_USER;
@@ -875,8 +888,15 @@ app.post('/schedule', async (req, res) => {
       if (validRefreshToken) {
         tokensLocal.refreshToken = validRefreshToken;
         if (!schedProviderName.includes('tiktok')) {
-          tokensLocal.googleRefreshToken = validRefreshToken; // Only for Google/default providers
+          tokensLocal.googleRefreshToken = validRefreshToken;
         }
+      }
+
+      // LinkedIn-specific: map the access token for LinkedIn provider
+      if (schedProviderName.includes('linkedin') && validAccessToken) {
+        tokensLocal.linkedInAccessToken = validAccessToken;
+        tokensLocal.linkedinAccessToken = validAccessToken;
+        console.log(`[Schedule] Mapped LinkedIn access token`);
       }
 
       const { body: _ignoredBody, headers: _ignoredHeaders, query: _ignoredQuery, ...flatConfig } = userConfig;

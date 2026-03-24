@@ -141,6 +141,15 @@ async function processAgentItem(node, inputData, executionContext, params, langu
     if (!apiKey) {
       throw new Error('ANTHROPIC_API_KEY not provided');
     }
+  } else if (provider === 'google-gemini') {
+    apiKey = executionContext.tokens?.googlePalmApiKey ||
+      executionContext.tokenInjector?.getToken('googlePalmApiKey') ||
+      process.env.GOOGLE_PALM_API_KEY;
+    apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    if (!apiKey) {
+      throw new Error('GOOGLE_PALM_API_KEY not provided');
+    }
   } else if (provider === 'huggingface') {
     apiKey = executionContext.tokens?.huggingFaceApiKey ||
       executionContext.tokenInjector?.getToken('huggingFaceApiKey') ||
@@ -367,6 +376,57 @@ async function processAgentItem(node, inputData, executionContext, params, langu
           text: content,
           model: model,
           usage: response.data.usage
+        }
+      }];
+    } else if (provider === 'google-gemini') {
+      // Call Google Gemini API
+      // Convert OpenAI-style messages to Gemini format
+      const geminiContents = [];
+      let systemInstruction = null;
+
+      for (const msg of messages) {
+        if (msg.role === 'system') {
+          systemInstruction = { parts: [{ text: msg.content }] };
+        } else {
+          geminiContents.push({
+            role: msg.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: msg.content }]
+          });
+        }
+      }
+
+      const requestBody = {
+        contents: geminiContents,
+        generationConfig: {
+          maxOutputTokens: 2048,
+          temperature: 0.7
+        }
+      };
+
+      if (systemInstruction) {
+        requestBody.systemInstruction = systemInstruction;
+      }
+
+      // apiUrl already includes the API key as a query param
+      response = await axios.post(
+        apiUrl,
+        requestBody,
+        {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const content = response.data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+      return [{
+        json: {
+          text: content,
+          output: content,
+          Content: content,
+          model: model,
+          provider: 'google-gemini'
         }
       }];
     } else if (provider === 'huggingface') {

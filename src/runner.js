@@ -30,6 +30,9 @@ const waitExecutor = require('./nodeExecutors/wait');
 const emailSendExecutor = require('./nodeExecutors/emailSend');
 const splitInBatchesExecutor = require('./nodeExecutors/splitInBatches');
 const groqChatExecutor = require('./nodeExecutors/groqChat');
+const rssFeedReadExecutor = require('./nodeExecutors/rssFeedRead');
+const googleGeminiChatExecutor = require('./nodeExecutors/googleGeminiChat');
+const linkedInExecutor = require('./nodeExecutors/linkedIn');
 const { evaluateExpression } = require('./utils/expressions');
 const TokenInjector = require('./utils/tokenInjector');
 
@@ -88,6 +91,14 @@ class WorkflowRunner {
       'n8n-nodes-base.splitInBatches': splitInBatchesExecutor,
       // Email
       'n8n-nodes-base.emailSend': emailSendExecutor,
+      // RSS Feed
+      'n8n-nodes-base.rssFeedRead': rssFeedReadExecutor,
+      // Google Gemini (PaLM) LM
+      '@n8n/n8n-nodes-langchain.lmChatGoogleGemini': googleGeminiChatExecutor,
+      // LinkedIn
+      'n8n-nodes-base.linkedIn': linkedInExecutor,
+      // Form Trigger (passthrough — used as entry node in some workflows)
+      'n8n-nodes-base.formTrigger': manualTriggerExecutor,
     };
 
     this.executionContext = {
@@ -367,6 +378,19 @@ class WorkflowRunner {
         }
       }
     }
+    
+    // Summary logging
+    const allWorkflowNodeNames = workflow.nodes.map(n => n.name);
+    const successfullyExecuted = Array.from(executedNodes).filter(name => allWorkflowNodeNames.includes(name));
+    const unexecuted = allWorkflowNodeNames.filter(name => !executedNodes.has(name) && !executedNodes.has(workflow.nodes.find(n => n.name === name)?.id));
+    
+    console.log(`\n[Runner] 🏁 Execution loop finished.`);
+    console.log(`[Runner] Nodes executed: ${successfullyExecuted.length} / ${allWorkflowNodeNames.length}`);
+    if (unexecuted.length > 0) {
+      console.log(`[Runner] ⚠️ UNEXECUTED NODES (Likely due to missing upstream data or circular dependencies):`);
+      unexecuted.forEach(node => console.log(`  - ${node}`));
+    }
+    console.log('');
   }
 
   /**
@@ -492,6 +516,8 @@ class WorkflowRunner {
    */
   async executeNode(node, inputData = []) {
     this.executionContext.currentNode = node;
+    console.log(`\n[Runner] ▶️ Executing node: '${node.name}' (${node.type})`);
+    console.log(`[Runner] Input data items: ${inputData.length}`);
 
     try {
       // Get executor for this node type
@@ -514,6 +540,8 @@ class WorkflowRunner {
       // If this is a trigger node and it returned empty results, log it
       if (node.type && node.type.includes('Trigger') && (!output || output.length === 0)) {
         console.log(`[Runner] Trigger node '${node.name}' returned no results - workflow will stop here`);
+      } else {
+        console.log(`[Runner] ✅ Node '${node.name}' completed successfully. Output items: ${output ? output.length : 0}`);
       }
 
       return output;
@@ -529,6 +557,7 @@ class WorkflowRunner {
 
       if (onError === 'continueErrorOutput' || isApiKeyError) {
         // Continue execution but store error
+        console.error(`[Runner] ⚠️ Node '${node.name}' encountered error but is configured to continue: ${error.message}`);
         this.executionContext.errors.push({
           node: node.name,
           error: error.message
@@ -539,6 +568,7 @@ class WorkflowRunner {
         return [{ json: { error: error.message } }];
       } else {
         // Stop execution
+        console.error(`[Runner] ❌ Node '${node.name}' failed with FATAL error: ${error.message}`);
         throw error;
       }
     }

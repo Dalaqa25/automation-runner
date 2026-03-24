@@ -88,7 +88,10 @@ function getTokenNameForCredentialType(credType, placeholderName) {
     'anthropicApi': 'anthropicApiKey',
     'huggingFaceApi': 'huggingFaceApiKey',
     'googleOAuth2': 'googleAccessToken',
-    'slackApi': 'slackToken'
+    'slackApi': 'slackToken',
+    'googlePalmApi': 'googlePalmApiKey',
+    'groqApi': 'groqApiKey',
+    'linkedInOAuth2Api': 'linkedInAccessToken'
   };
   
   // Try mapped name first
