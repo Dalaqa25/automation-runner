@@ -256,8 +256,17 @@ async function execute(node, inputData, executionContext) {
     } else {
       // Return just the data
       const carryData = inputData && inputData[0] && inputData[0].data ? inputData[0].data : undefined;
+      
+      // FIX: When responseFormat is 'text', response.data is a raw string.
+      // Downstream code nodes expect $json.data, so wrap strings in an object.
+      // This matches n8n's actual behavior where text responses are { data: "..." }.
+      let jsonData = response.data;
+      if (typeof response.data === 'string') {
+        jsonData = { data: response.data };
+      }
+      
       return [{
-        json: response.data,
+        json: jsonData,
         ...(carryData ? { data: carryData } : {})
       }];
     }

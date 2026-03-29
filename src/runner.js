@@ -33,6 +33,7 @@ const groqChatExecutor = require('./nodeExecutors/groqChat');
 const rssFeedReadExecutor = require('./nodeExecutors/rssFeedRead');
 const googleGeminiChatExecutor = require('./nodeExecutors/googleGeminiChat');
 const linkedInExecutor = require('./nodeExecutors/linkedIn');
+const respondToWebhookExecutor = require('./nodeExecutors/respondToWebhook');
 const { evaluateExpression } = require('./utils/expressions');
 const TokenInjector = require('./utils/tokenInjector');
 
@@ -99,6 +100,8 @@ class WorkflowRunner {
       'n8n-nodes-base.linkedIn': linkedInExecutor,
       // Form Trigger (passthrough — used as entry node in some workflows)
       'n8n-nodes-base.formTrigger': manualTriggerExecutor,
+      // Respond to Webhook (passthrough — terminal node)
+      'n8n-nodes-base.respondToWebhook': respondToWebhookExecutor,
     };
 
     this.executionContext = {

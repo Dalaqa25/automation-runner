@@ -138,6 +138,48 @@ function evaluateExpressionValue(expression, context) {
     }
   }
 
+  // Handle JavaScript function calls wrapping expressions
+  // e.g., JSON.stringify($json.linkedinText), encodeURIComponent($json.url)
+  const jsFuncMatch = expr.match(/^(JSON\.stringify|JSON\.parse|encodeURIComponent|encodeURI|decodeURIComponent|decodeURI|String|Number|parseInt|parseFloat)\s*\((.+)\)$/);
+  if (jsFuncMatch) {
+    const funcName = jsFuncMatch[1];
+    const innerExpr = jsFuncMatch[2].trim();
+    const innerValue = evaluateExpressionValue(innerExpr, context);
+    try {
+      switch (funcName) {
+        case 'JSON.stringify': return JSON.stringify(innerValue);
+        case 'JSON.parse': return JSON.parse(innerValue);
+        case 'encodeURIComponent': return encodeURIComponent(innerValue);
+        case 'encodeURI': return encodeURI(innerValue);
+        case 'decodeURIComponent': return decodeURIComponent(innerValue);
+        case 'decodeURI': return decodeURI(innerValue);
+        case 'String': return String(innerValue);
+        case 'Number': return Number(innerValue);
+        case 'parseInt': return parseInt(innerValue);
+        case 'parseFloat': return parseFloat(innerValue);
+        default: return innerValue;
+      }
+    } catch (e) {
+      console.error(`[Expression] Error evaluating ${funcName}(${innerExpr}):`, e.message);
+      return undefined;
+    }
+  }
+
+  // Handle new Date().getTime() and similar Date expressions
+  if (expr.startsWith('new Date()')) {
+    try {
+      const d = new Date();
+      const rest = expr.replace('new Date()', '').trim();
+      if (rest === '.getTime()') return d.getTime();
+      if (rest === '.toISOString()') return d.toISOString();
+      if (rest === '.toString()') return d.toString();
+      if (rest === '') return d;
+      return d;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   // Fallback: try to evaluate as $json
   if (expr.startsWith('$')) {
     return getJsonValue(expr, context.currentInput);

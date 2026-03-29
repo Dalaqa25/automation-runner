@@ -680,17 +680,19 @@ app.post('/api/automations/run', async (req, res) => {
     }
 
     // Check if this was a "no new files" scenario (not an actual error)
-    // triggerOutput and noNewFiles are already defined above
-
-    // If trigger found no files and there are no other errors, consider it success
-    const actualSuccess = noNewFiles ? true : result.success;
+    // CRITICAL FIX: Only apply the noNewFiles override when:
+    // 1. The automation actually HAS a Google Drive trigger (triggerNode exists)
+    // 2. The workflow didn't have real execution errors (only the "no files" non-error)
+    const hasRealErrors = result.errors && result.errors.length > 0 && 
+      !result.errors.every(e => e.includes('no new files') || e.includes('No new'));
+    const actualSuccess = (triggerNode && noNewFiles && !hasRealErrors) ? true : result.success;
 
     res.json({
       success: actualSuccess,
       automation_id,
       user_id,
       errors: actualSuccess ? [] : (result.errors || []),
-      message: noNewFiles ? 'No new files to process' : undefined,
+      message: (triggerNode && noNewFiles) ? 'No new files to process' : undefined,
       filesProcessed: triggerOutput.length,
       outputs: result.success ? result.outputs : undefined, // Include outputs on success for debugging
       executed_at: new Date().toISOString()
