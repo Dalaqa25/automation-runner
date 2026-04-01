@@ -413,19 +413,40 @@ app.post('/api/automations/run', async (req, res) => {
     // Step 2: Fetch user_automation for this specific user (includes OAuth tokens and automation_data)
     console.log(`[Orchestration] Fetching user_automation for user_id=${user_id}, automation_id=${automation_id}`);
 
-    const { data: instanceData, error: instanceError } = await supabase
+    let instanceData;
+    const { data: fetchedInstance, error: instanceError } = await supabase
       .from('user_automations')
       .select('id, automation_id, user_id, provider, parameters, is_active, access_token, refresh_token, token_expiry, automation_data, run_count')
       .eq('user_id', user_id)
       .eq('automation_id', automation_id)
       .single();
 
-    if (instanceError || !instanceData) {
-      console.error('[Orchestration] Failed to fetch user_automation:', instanceError);
-      return res.status(404).json({
-        success: false,
-        error: `No user automation found for user ${user_id} and automation ${automation_id}. User needs to set up this automation first.`
-      });
+    if (instanceError || !fetchedInstance) {
+      console.log(`[Orchestration] No user_automation row found — auto-creating for on-demand automation`);
+
+      const { data: upserted, error: upsertError } = await supabase
+        .from('user_automations')
+        .upsert({
+          user_id,
+          automation_id,
+          provider: 'none',
+          parameters: config,
+          is_active: false,
+          run_count: 0,
+          automation_data: {},
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id,automation_id' })
+        .select('id, automation_id, user_id, provider, parameters, is_active, access_token, refresh_token, token_expiry, automation_data, run_count')
+        .single();
+
+      if (upsertError || !upserted) {
+        console.error('[Orchestration] Failed to auto-create user_automation:', upsertError);
+        return res.status(500).json({ success: false, error: 'Failed to initialize automation instance.' });
+      }
+
+      instanceData = upserted;
+    } else {
+      instanceData = fetchedInstance;
     }
 
     console.log(`[Orchestration] Found user_automation: ${instanceData.id}`);
@@ -471,7 +492,8 @@ app.post('/api/automations/run', async (req, res) => {
 
     // Step 6: Resolve credential placeholders in workflow
     const { workflow: resolvedWorkflow, resolvedCredentials } = resolveCredentials(workflow, developerKeys);
-    workflow = resolvedWorkflow; // Use resolved workflow
+    // Also inject developer keys as {{PLACEHOLDER}} replacements in node parameters (e.g. header values)
+    workflow = injectParameters(resolvedWorkflow, developerKeys);
 
     console.log(`[Orchestration] Loaded ${Object.keys(developerKeys).length} developer keys`);
     if (Object.keys(resolvedCredentials).length > 0) {

@@ -1,5 +1,6 @@
 const { VM } = require('vm2');
 const { evaluateExpression } = require('../utils/expressions');
+const axios = require('axios');
 
 /**
  * Code Node Executor
@@ -41,17 +42,21 @@ async function execute(node, inputData, executionContext) {
       console: {
         log: (...args) => console.log('[Code Node]', ...args),
         error: (...args) => console.error('[Code Node]', ...args)
-      }
+      },
+      require: (mod) => {
+        if (mod === 'axios') return axios;
+        throw new Error(`Module '${mod}' is not available in code nodes`);
+      },
+      $env: process.env
     }
   });
 
   try {
-    // Always wrap code in a function to allow return statements
-    // This is how n8n code nodes work - they're essentially function bodies
-    const wrappedCode = `(function() { ${jsCode} })()`;
+    // Always wrap code in an async function to allow return statements and await
+    const wrappedCode = `(async function() { ${jsCode} })()`;
 
-    // Execute the code
-    const result = vm.run(wrappedCode);
+    // Execute the code - result may be a Promise
+    const result = await Promise.resolve(vm.run(wrappedCode));
 
     // Handle different return types
     if (Array.isArray(result)) {
