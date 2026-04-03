@@ -114,9 +114,10 @@ const workflowService = new WorkflowService({
   },
 });
 
-// Enable CORS for Next.js app (localhost:3000)
+// Enable CORS - allow configured origin or all origins for server-to-server calls
+const allowedOrigin = process.env.ALLOWED_ORIGIN;
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN || 'http://localhost:3000',
+  origin: allowedOrigin ? [allowedOrigin, 'http://localhost:3000'] : true,
   credentials: true
 }));
 
@@ -637,6 +638,7 @@ app.post('/api/automations/run', async (req, res) => {
     runner.lastPollTime = lastPollTime;
     runner.processedFiles = processedFiles;
     runner.initialData = initialData;
+    runner.staticData = automationState.staticData || {};
 
     const result = await runner.execute(
       workflow,
@@ -669,10 +671,15 @@ app.post('/api/automations/run', async (req, res) => {
     // Use executionStartTime instead of "now" to ensure we cover the execution window next time
     const newPollTime = executionStartTime;
     const updatedAutomationData = {
+      ...automationState,
       lastPollTime: newPollTime,
       processedFiles: Array.from(processedFiles),
       lastRun: newPollTime,
-      totalProcessed: processedFiles.size
+      totalProcessed: processedFiles.size,
+      staticData: {
+        ...(automationState.staticData || {}),
+        ...(runner.executionContext?.staticData || {})
+      }
     };
 
     // Get current run_count to increment it

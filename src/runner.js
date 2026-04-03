@@ -135,7 +135,8 @@ class WorkflowRunner {
       // Preserve pre-set values from orchestration (for polling triggers)
       lastPollTime: this.lastPollTime || null,
       processedFiles: this.processedFiles || new Set(),
-      initialData: this.initialData || initialData
+      initialData: this.initialData || initialData,
+      staticData: this.staticData || {}
     };
 
     // Inject tokens into execution context

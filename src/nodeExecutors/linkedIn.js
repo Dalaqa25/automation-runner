@@ -9,6 +9,15 @@ const { evaluateExpression } = require('../utils/expressions');
 async function execute(node, inputData, executionContext) {
   const params = node.parameters || {};
 
+  // Debug: log the raw expression and input data structure
+  console.log(`[LinkedIn] Raw params.text expression: ${JSON.stringify(params.text)}`);
+  console.log(`[LinkedIn] Input data items: ${inputData?.length || 0}`);
+  if (inputData && inputData.length > 0) {
+    console.log(`[LinkedIn] Input[0] keys: ${JSON.stringify(Object.keys(inputData[0]?.json || {}))}`);
+    console.log(`[LinkedIn] Input[0] json: ${JSON.stringify(inputData[0]?.json)?.substring(0, 500)}`);
+  }
+  console.log(`[LinkedIn] Available node outputs: ${Object.keys(executionContext.nodes || {}).join(', ')}`);
+
   // Evaluate the post text (may contain expressions)
   let text = params.text || '';
   if (text.startsWith('=') || text.includes('{{')) {
@@ -16,6 +25,29 @@ async function execute(node, inputData, executionContext) {
       currentInput: inputData,
       executionContext
     });
+  }
+
+  console.log(`[LinkedIn] Evaluated text (first 200 chars): ${JSON.stringify(text)?.substring(0, 200)}`);
+  console.log(`[LinkedIn] Text type: ${typeof text}, truthy: ${!!text}`);
+
+  // Fallback: if expression evaluated to empty/undefined, try to extract text
+  // from input data using common field names that agent/code nodes produce
+  if (!text && inputData && inputData.length > 0) {
+    const inputJson = inputData[0]?.json || {};
+    // Try common field names in priority order
+    const fallbackFields = ['text', 'output', 'Content', 'content', 'message', 'linkedinText', 'post', 'postContent', 'linkedin_post'];
+    for (const field of fallbackFields) {
+      if (inputJson[field] && typeof inputJson[field] === 'string' && inputJson[field].trim().length > 0) {
+        text = inputJson[field];
+        console.log(`[LinkedIn] Fallback: using input field '${field}' (${text.length} chars)`);
+        break;
+      }
+    }
+
+    // If still empty, try stringifying the full input as last resort (only if it looks like post content)
+    if (!text && Object.keys(inputJson).length > 0) {
+      console.log(`[LinkedIn] WARNING: Could not find text in any known field. Available fields: ${Object.keys(inputJson).join(', ')}`);
+    }
   }
 
   if (!text) {

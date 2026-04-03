@@ -38,6 +38,14 @@ async function execute(node, inputData, executionContext) {
         }
         return null;
       },
+      // $getWorkflowStaticData - mimic n8n state persistence helper
+      $getWorkflowStaticData: (type) => {
+        if (!executionContext.staticData) {
+          // Initialize state per execution context
+          executionContext.staticData = {};
+        }
+        return executionContext.staticData;
+      },
       // Helper functions
       console: {
         log: (...args) => console.log('[Code Node]', ...args),
