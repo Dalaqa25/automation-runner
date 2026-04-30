@@ -34,6 +34,25 @@ async function execute(node, inputData, executionContext) {
 
   const method = (params.method || params.httpMethod || 'GET').toUpperCase();
 
+  // Build query parameters
+  let finalUrl = url;
+  if (params.sendQuery && params.queryParameters?.parameters) {
+    const queryParams = new URLSearchParams();
+    for (const param of params.queryParameters.parameters) {
+      const paramValue = evaluateExpression(param.value || '', {
+        currentInput: inputData,
+        executionContext
+      });
+      console.log(`[HTTP] Query param: ${param.name} = "${paramValue}"`);
+      queryParams.append(param.name, paramValue);
+    }
+    const queryString = queryParams.toString();
+    if (queryString) {
+      finalUrl = url + (url.includes('?') ? '&' : '?') + queryString;
+      console.log(`[HTTP] Final URL with query params: ${finalUrl}`);
+    }
+  }
+
   // Build headers
   const headers = {};
   if (params.sendHeaders && params.headerParameters?.parameters) {
@@ -70,7 +89,7 @@ async function execute(node, inputData, executionContext) {
   // Build request config
   const config = {
     method,
-    url,
+    url: finalUrl,
     headers,
     timeout: 30000,
     maxRedirects: 5
