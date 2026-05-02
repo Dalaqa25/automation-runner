@@ -27,3 +27,11 @@ build/
 # Redis dump
 dump.rdb
 
+# Test files
+test-*.js
+debug-*.js
+*-example.ts
+automation-*.json
+get_auto.js
+read_error.js
+fix-*.js

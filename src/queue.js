@@ -98,7 +98,7 @@ async function createNotification(job, status, result, error) {
     if (notifError) {
       console.error('[Queue] Failed to create notification:', notifError);
     } else {
-      console.log('[Queue] Notification created for user:', user.email);
+      // Notification created successfully
     }
   } catch (err) {
     console.error('[Queue] Error creating notification:', err.message);
@@ -242,13 +242,7 @@ const worker = new Worker(
     const runner = new WorkflowRunner();
 
     console.log(`[Queue] Processing workflow: ${workflow.name || 'unnamed'}`);
-    if (tokens) {
-      const tokenKeys = Object.keys(tokens).filter(key => tokens[key] !== null);
-      console.log(`[Queue] Injecting tokens: ${tokenKeys.join(', ')}`);
-    }
-    if (tokenMapping) {
-      console.log(`[Queue] Using custom token mapping: ${Object.keys(tokenMapping).join(', ')}`);
-    }
+    // Token injection enabled (details hidden for security)
 
     // Re-fetch and refresh tokens from DB to avoid using stale/expired tokens
     const freshTokens = await refreshJobTokens(tokens || {}, initialData);

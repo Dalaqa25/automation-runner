@@ -37,7 +37,7 @@ class BackgroundService {
     }
 
     try {
-      console.log(`[BackgroundService] Looking for user_automation with user_id=${userId}, automation_id=${automationId}`);
+      console.log(`[BackgroundService] Looking for user_automation with user_id and automation_id`);
 
       // Load user_automation record (contains user-specific config, state, AND tokens)
       const { data: userAutomation, error: userAutomationError } = await this.supabase
@@ -60,7 +60,7 @@ class BackgroundService {
       // Use provided config or fall back to stored parameters
       const userConfig = config || userAutomation.parameters || {};
 
-      console.log(`[BackgroundService] User config keys: ${Object.keys(userConfig).join(', ')}`);
+      console.log(`[BackgroundService] User config loaded with ${Object.keys(userConfig).length} parameters`);
 
       // Check if we have OAuth tokens
       if (!userAutomation.access_token || !userAutomation.refresh_token) {
@@ -127,7 +127,7 @@ class BackgroundService {
         Object.assign(tokens, automationData.developer_keys);
       }
 
-      console.log(`[BackgroundService] Tokens available: ${Object.keys(tokens).join(', ')}`);
+      // Token injection enabled (details hidden for security)
 
       // Load automation_data from user_automations (contains processed files list)
       const automationDataState = userAutomation.automation_data || {};
